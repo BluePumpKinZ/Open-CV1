@@ -1,0 +1,11 @@
+{
+   "driver_openhmd" : {
+      "enable" : true,
+      "secondsFromVsyncToPhotons" : 0.011,
+      "displayFrequency" : 0,
+      "poseOffsetX" : 0.0,
+      "poseOffsetY" : 0.0,
+      "poseOffsetZ" : 0.0,
+      "poseYawDegrees" : 0.0
+   }
+}

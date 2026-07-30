@@ -463,7 +463,7 @@ public:
 		pose.qRotation.w = quat[3];
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v1
-		float ang_vel[3], ang_accel[3];
+		float ang_vel[3];
 		if (ohmd_device_getf(device, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
 			pose.vecAngularVelocity[0] = ang_vel[0];
 			pose.vecAngularVelocity[1] = ang_vel[1];
@@ -1105,6 +1105,20 @@ public:
 		pose.vecAcceleration[1] = accel[1];
 		pose.vecAcceleration[2] = accel[2];
 	}
+#endif
+
+#ifdef OHMD_HAVE_VEL_ACCEL_API_v1
+        float ang_vel[3], ang_accel[3];
+        if (ohmd_device_getf(d, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
+                pose.vecAngularVelocity[0] = ang_vel[0];
+                pose.vecAngularVelocity[1] = ang_vel[1];
+                pose.vecAngularVelocity[2] = ang_vel[2];
+        }
+        if (ohmd_device_getf(d, OHMD_ANGULAR_ACCELERATION_VECTOR, ang_accel) == 0) {
+                pose.vecAngularAcceleration[0] = ang_accel[0];
+                pose.vecAngularAcceleration[1] = ang_accel[1];
+                pose.vecAngularAcceleration[2] = ang_accel[2];
+        }
 #endif
 
         //printf("%f %f %f %f  %f %f %f\n", quat[0], quat[1], quat[2], quat[3], pos[0], pos[1], pos[2]);

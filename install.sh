@@ -67,6 +67,7 @@ else:
 driver_openhmd = data.setdefault("driver_openhmd", {})
 driver_openhmd["enable"] = True
 driver_openhmd["displayFrequency"] = 90
+driver_openhmd.setdefault("secondsFromVsyncToPhotons", 0.011)
 driver_openhmd.setdefault("poseOffsetX", 0.0)
 driver_openhmd.setdefault("poseOffsetY", 0.0)
 driver_openhmd.setdefault("poseOffsetZ", 0.0)

@@ -9,7 +9,9 @@ cache_files() {
     shopt -s nullglob
     local files=("${CONFIG_DIR}"/rift-sensor-pose-*.txt)
     shopt -u nullglob
-    printf '%s\n' "${files[@]}"
+    if [[ ${#files[@]} -gt 0 ]]; then
+        printf '%s\n' "${files[@]}"
+    fi
 }
 
 cache_path_for_serial() {

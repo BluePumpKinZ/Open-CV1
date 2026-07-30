@@ -15,6 +15,7 @@ BIN_DIR="${HOME}/bin"
 APP_DIR="${HOME}/.local/share/applications"
 LAUNCHER_LINK="${BIN_DIR}/start-steamvr-openhmd.sh"
 OFFSET_LINK="${BIN_DIR}/set-open-cv1-pose-offset.sh"
+CALIBRATION_LINK="${BIN_DIR}/calibrate-open-cv1-sensors.sh"
 DESKTOP_FILE="${APP_DIR}/SteamVR-OpenHMD.desktop"
 
 need_cmd() {
@@ -91,6 +92,7 @@ fi
 
 ln -sfn "${ROOT_DIR}/scripts/start-steamvr-openhmd.sh" "${LAUNCHER_LINK}"
 ln -sfn "${ROOT_DIR}/scripts/set-pose-offset.sh" "${OFFSET_LINK}"
+ln -sfn "${ROOT_DIR}/scripts/calibrate-cv1-sensors.sh" "${CALIBRATION_LINK}"
 
 cat > "${DESKTOP_FILE}" <<EOF
 [Desktop Entry]
@@ -107,6 +109,6 @@ EOF
 echo "Open-CV1 installed."
 echo "Launcher: ${LAUNCHER_LINK}"
 echo "Pose offset helper: ${OFFSET_LINK}"
+echo "Sensor calibration helper: ${CALIBRATION_LINK}"
 echo "Config file: ${CONFIG_FILE}"
 echo "SteamVR settings: ${STEAMVR_SETTINGS}"
-

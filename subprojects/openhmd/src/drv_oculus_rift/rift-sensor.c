@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <inttypes.h>
+#include <ctype.h>
 
 #include "rift-sensor.h"
 #include "rift-sensor-pose-search.h"
@@ -30,6 +31,7 @@
 #include "ohmd-jpeg.h"
 
 #include "ohmd-pipewire.h"
+#include "../openhmdi.h"
 
 #define ASSERT_MSG(_v, label, ...) if(!(_v)){ fprintf(stderr, __VA_ARGS__); goto label; }
 
@@ -94,11 +96,114 @@ struct rift_sensor_ctx_s
 	ohmd_thread* fast_analysis_thread;
 	ohmd_thread* long_analysis_thread;
 
+	bool pose_loaded_from_cache;
+	bool pose_saved_to_cache;
+
 	/* Pipewire output streams */
 	ohmd_pw_video_stream *debug_vid_raw;
 	ohmd_pw_video_stream *debug_vid;
 	uint8_t *debug_frame;
 };
+
+static void
+make_sensor_pose_key(rift_sensor_ctx *sensor, char *key, size_t key_len)
+{
+	char serial[32];
+	size_t i;
+
+	for (i = 0; i < sizeof(serial) - 1 && sensor->serial_no[i] != '\0'; i++) {
+		unsigned char c = (unsigned char)sensor->serial_no[i];
+		serial[i] = isalnum(c) ? (char)c : '_';
+	}
+	serial[i] = '\0';
+
+	snprintf(key, key_len, "rift-sensor-pose-%s.txt", serial);
+}
+
+static void
+save_sensor_pose_cache(rift_sensor_ctx *sensor)
+{
+	char key[128];
+	char buf[256];
+	posef *pose = &sensor->pf.camera_pose;
+
+	make_sensor_pose_key(sensor, key, sizeof(key));
+
+	int len = snprintf(
+		buf,
+		sizeof(buf),
+		"%f %f %f %f %f %f %f\n",
+		pose->orient.x,
+		pose->orient.y,
+		pose->orient.z,
+		pose->orient.w,
+		pose->pos.x,
+		pose->pos.y,
+		pose->pos.z
+	);
+	if (len <= 0 || len >= (int)sizeof(buf))
+		return;
+
+	if (ohmd_set_config(sensor->ohmd_ctx, key, buf, (unsigned long)len) == 0) {
+		sensor->pose_saved_to_cache = true;
+		LOGI(
+			"Saved sensor %d pose cache %s quat %f %f %f %f pos %f %f %f",
+			sensor->id,
+			key,
+			pose->orient.x,
+			pose->orient.y,
+			pose->orient.z,
+			pose->orient.w,
+			pose->pos.x,
+			pose->pos.y,
+			pose->pos.z
+		);
+	}
+}
+
+static void
+load_sensor_pose_cache(rift_sensor_ctx *sensor)
+{
+	char key[128];
+	char *buf = NULL;
+	unsigned long len = 0;
+	posef pose;
+
+	make_sensor_pose_key(sensor, key, sizeof(key));
+	if (ohmd_get_config(sensor->ohmd_ctx, key, &buf, &len) < 0 || buf == NULL)
+		return;
+
+	if (sscanf(
+		buf,
+		"%f %f %f %f %f %f %f",
+		&pose.orient.x,
+		&pose.orient.y,
+		&pose.orient.z,
+		&pose.orient.w,
+		&pose.pos.x,
+		&pose.pos.y,
+		&pose.pos.z
+	) == 7) {
+		sensor->pf.camera_pose = pose;
+		sensor->pf.have_camera_pose = true;
+		sensor->pose_loaded_from_cache = true;
+		sensor->pose_saved_to_cache = true;
+		LOGI(
+			"Loaded sensor %d pose cache %s quat %f %f %f %f pos %f %f %f",
+			sensor->id,
+			key,
+			pose.orient.x,
+			pose.orient.y,
+			pose.orient.z,
+			pose.orient.w,
+			pose.pos.x,
+			pose.pos.y,
+			pose.pos.z
+		);
+	}
+
+	free(buf);
+}
 
 #define INIT_QUEUE(q) \
 		(q)->head = (q)->tail = 0;
@@ -257,6 +362,7 @@ static void analyse_frame_fast(rift_sensor_ctx *sensor, rift_sensor_analysis_fra
 	ohmd_video_frame *vframe = frame->vframe;
 	int width = vframe->width;
 	int height = vframe->height;
+	bool had_camera_pose = sensor->pf.have_camera_pose;
 
 	LOGD("Sensor %d Frame %d - starting fast analysis", sensor->id, frame->id);
 
@@ -286,6 +392,9 @@ static void analyse_frame_fast(rift_sensor_ctx *sensor, rift_sensor_analysis_fra
 		}
 #endif
 	}
+
+	if (!had_camera_pose && sensor->pf.have_camera_pose && !sensor->pose_saved_to_cache)
+		save_sensor_pose_cache(sensor);
 
 	frame->image_analysis_finish_ts = ohmd_monotonic_get(sensor->ohmd_ctx);
 
@@ -353,6 +462,7 @@ rift_sensor_new(ohmd_context* ohmd_ctx, int id, const char *serial_no,
 	sensor_ctx->bw = blobwatch_new(calib->is_cv1 ? BLOB_THRESHOLD_CV1 : BLOB_THRESHOLD_DK2);
 
 	rift_pose_finder_init(&sensor_ctx->pf, calib, (rift_pose_finder_cb) handle_found_pose, sensor_ctx);
+	load_sensor_pose_cache(sensor_ctx);
 
 	/* Raw debug video stream */
 	sensor_ctx->debug_vid_raw = ohmd_pw_video_stream_new (stream_id, "Rift Sensor", OHMD_PW_VIDEO_FORMAT_GRAY8,
@@ -468,8 +578,11 @@ static unsigned int long_analysis_thread(void *arg)
 				ohmd_unlock_mutex (ctx->sensor_lock);
 
 				frame->long_analysis_start_ts = ohmd_monotonic_get(ctx->ohmd_ctx);
+				bool had_camera_pose = ctx->pf.have_camera_pose;
 				rift_pose_finder_process_blobs_long(&ctx->pf, frame, ctx->devices);
 				frame->long_analysis_finish_ts = ohmd_monotonic_get(ctx->ohmd_ctx);
+				if (!had_camera_pose && ctx->pf.have_camera_pose && !ctx->pose_saved_to_cache)
+					save_sensor_pose_cache(ctx);
 
 				ohmd_lock_mutex (ctx->sensor_lock);
 				ctx->long_analysis_busy = false;

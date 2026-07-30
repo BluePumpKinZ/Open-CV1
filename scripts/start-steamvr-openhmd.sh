@@ -2,7 +2,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+ROOT_DIR="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 STEAM_DIR="${HOME}/.local/share/Steam"
 STEAMVR_DIR="${STEAM_DIR}/steamapps/common/SteamVR"
 SNIPER_RUN="${STEAM_DIR}/steamapps/common/SteamLinuxRuntime_sniper/run"
@@ -75,4 +76,3 @@ if steam_is_running; then
 fi
 
 exec "${STEAM_CMD}" "steam://rungameid/250820"
-

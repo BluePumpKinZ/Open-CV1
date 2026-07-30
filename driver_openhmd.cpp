@@ -10,6 +10,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <cstring>
 #include <sstream>
 
@@ -1164,7 +1165,11 @@ class CServerDriver_OpenHMD: public IServerTrackedDeviceProvider
 {
 public:
     CServerDriver_OpenHMD()
-        : m_OpenHMDDeviceDriver( NULL )
+        : m_OpenHMDDeviceDriver( NULL ),
+          m_OpenHMDDeviceDriverControllerL( NULL ),
+          m_OpenHMDDeviceDriverControllerR( NULL ),
+          m_poseThread( nullptr ),
+          m_poseThreadExit( false )
     {
     }
     virtual ~CServerDriver_OpenHMD() {}
@@ -1178,9 +1183,15 @@ public:
     virtual void LeaveStandby()  {}
 
 private:
+    void StartPoseThread();
+    void StopPoseThread();
+    void PoseThreadMain();
+
     COpenHMDDeviceDriver *m_OpenHMDDeviceDriver;
     COpenHMDDeviceDriverController *m_OpenHMDDeviceDriverControllerL;
     COpenHMDDeviceDriverController *m_OpenHMDDeviceDriverControllerR;
+    std::thread *m_poseThread;
+    std::atomic<bool> m_poseThreadExit;
 };
 
 CServerDriver_OpenHMD g_serverDriverOpenHMD;
@@ -1261,11 +1272,15 @@ EVRInitError CServerDriver_OpenHMD::Init( vr::IVRDriverContext *pDriverContext )
 		vr::VRServerDriverHost()->TrackedDeviceAdded(  m_OpenHMDDeviceDriverControllerR->GetSerialNumber().c_str(), vr::TrackedDeviceClass_Controller, m_OpenHMDDeviceDriverControllerR );
     }
 
+    StartPoseThread();
+
     return VRInitError_None;
 }
 
 void CServerDriver_OpenHMD::Cleanup()
 {
+    StopPoseThread();
+
     CleanupDriverLog();
     delete m_OpenHMDDeviceDriver;
     m_OpenHMDDeviceDriver = NULL;
@@ -1282,16 +1297,6 @@ void CServerDriver_OpenHMD::Cleanup()
 
 void CServerDriver_OpenHMD::RunFrame()
 {
-    ohmd_ctx_update(ctx);
-
-    if ( m_OpenHMDDeviceDriver )
-        m_OpenHMDDeviceDriver->RunFrame();
-
-    if (m_OpenHMDDeviceDriverControllerL)
-        m_OpenHMDDeviceDriverControllerL->RunFrame();
-    if (m_OpenHMDDeviceDriverControllerR)
-        m_OpenHMDDeviceDriverControllerR->RunFrame();
-
     vr::VREvent_t vrEvent;
     while ( vr::VRServerDriverHost()->PollNextEvent( &vrEvent, sizeof( vrEvent ) ) )
     {
@@ -1301,6 +1306,45 @@ void CServerDriver_OpenHMD::RunFrame()
             m_OpenHMDDeviceDriverControllerR->ProcessEvent( vrEvent );
     }
 
+}
+
+void CServerDriver_OpenHMD::StartPoseThread()
+{
+    m_poseThreadExit = false;
+    m_poseThread = new std::thread(&CServerDriver_OpenHMD::PoseThreadMain, this);
+}
+
+void CServerDriver_OpenHMD::StopPoseThread()
+{
+    m_poseThreadExit = true;
+    if (m_poseThread) {
+        m_poseThread->join();
+        delete m_poseThread;
+        m_poseThread = nullptr;
+    }
+}
+
+void CServerDriver_OpenHMD::PoseThreadMain()
+{
+    DriverLog("Starting pose update thread\n");
+
+    while (!m_poseThreadExit) {
+        if (ctx)
+            ohmd_ctx_update(ctx);
+
+        if (m_OpenHMDDeviceDriver)
+            m_OpenHMDDeviceDriver->RunFrame();
+
+        if (m_OpenHMDDeviceDriverControllerL)
+            m_OpenHMDDeviceDriverControllerL->RunFrame();
+
+        if (m_OpenHMDDeviceDriverControllerR)
+            m_OpenHMDDeviceDriverControllerR->RunFrame();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    DriverLog("Pose update thread exiting\n");
 }
 
 //-----------------------------------------------------------------------------

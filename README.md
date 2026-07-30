@@ -10,6 +10,8 @@ This repository keeps the upstream source layout so the driver can still be buil
 - a one-shot installer for SteamVR registration and local config
 - a launcher script that starts SteamVR against this driver tree
 - a pose-offset helper for height and origin correction
+- a CV1 sensor calibration helper with persistent pose caches
+- a faster async pose update loop for SteamVR delivery
 - CV1-oriented documentation and setup notes
 
 ## Current status
@@ -62,6 +64,7 @@ What `install.sh` does:
 Installed helpers:
 - `~/bin/start-steamvr-openhmd.sh`
 - `~/bin/set-open-cv1-pose-offset.sh`
+- `~/bin/calibrate-open-cv1-sensors.sh`
 
 ## Launch
 
@@ -134,6 +137,44 @@ That means:
 - origin correction can be handled with the pose offset settings above
 - sensor-to-world calibration is still fundamentally rougher than the official stack
 
+This repository adds persistent CV1 sensor pose caches under `~/.config/openhmd/rift-sensor-pose-*.txt`.
+They are automatically loaded on startup and saved after the tracker learns a sensor pose.
+
+To force a fresh relearn:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --relearn
+```
+
+To inspect current cached sensor poses:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --show
+```
+
+To manually shift all saved sensors upward by 10 cm:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --offset 0 0.10 0
+```
+
+To set one sensor to an explicit position while keeping its saved orientation:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --set-pos WMTD305L40075G 0.10 -0.20 1.55
+```
+
+To write a complete quaternion + position pose for one sensor:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --set WMTD305L40075G -0.92 -0.15 0.34 -0.01 0.14 -0.28 1.56
+```
+
+The cache format is:
+- `qx qy qz qw px py pz`
+- quaternion first, then position in meters
+- edit carefully and restart SteamVR after manual changes
+
 ## GPU note
 
 In the tested working setup, SteamVR compositor logs showed:
@@ -154,6 +195,5 @@ Main upstream source/license files kept here:
 ## Known next steps
 
 The most promising technical follow-ups are:
-- asynchronous pose updates instead of relying only on SteamVR `RunFrame()`
 - better CV1-specific tracking calibration tooling
 - real proximity/presence support

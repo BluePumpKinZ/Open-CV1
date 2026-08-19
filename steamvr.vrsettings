@@ -23,6 +23,7 @@
       "poseOffsetY": 0.0,
       "poseOffsetZ": 0.0,
       "poseYawDegrees": 0.0,
+      "logPoseTiming": false,
       "synthesizeAngularAcceleration": true
    },
    "version" : "1"

@@ -77,6 +77,7 @@ static const char * const k_pch_Sample_PoseOffsetY_Float = "poseOffsetY";
 static const char * const k_pch_Sample_PoseOffsetZ_Float = "poseOffsetZ";
 static const char * const k_pch_Sample_PoseYawDegrees_Float = "poseYawDegrees";
 static const char * const k_pch_Sample_SynthesizeAngularAcceleration_Bool = "synthesizeAngularAcceleration";
+static const char * const k_pch_Sample_LogPoseTiming_Bool = "logPoseTiming";
 
 HmdQuaternion_t identityquat{ 1, 0, 0, 0};
 
@@ -89,6 +90,7 @@ struct PoseOffsets
 };
 
 static PoseOffsets g_poseOffsets{0.0f, 0.0f, 0.0f, 0.0f};
+static bool g_logPoseTiming = false;
 
 static HmdQuaternion_t MakeYawQuaternion(float degrees)
 {
@@ -1132,6 +1134,8 @@ public:
 
         ApplyPoseOffsets(pose);
 
+        RecordPoseTiming(quat, pos);
+
         return pose;
     }
 
@@ -1150,6 +1154,70 @@ public:
     std::string GetSerialNumber() const { return m_sSerialNumber; }
 
 private:
+    void RecordPoseTiming(const float quaternion[4], const float position[3])
+    {
+        if (!g_logPoseTiming)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!m_havePoseTimingSample) {
+            memcpy(m_previousTimingQuaternion, quaternion, sizeof(m_previousTimingQuaternion));
+            memcpy(m_previousTimingPosition, position, sizeof(m_previousTimingPosition));
+            m_poseTimingReportStart = now;
+            m_previousPosePublishTime = now;
+            m_previousRotationChangeTime = now;
+            m_previousPositionChangeTime = now;
+            m_havePoseTimingSample = true;
+            return;
+        }
+
+        const double publishGapMs = std::chrono::duration<double, std::milli>(now - m_previousPosePublishTime).count();
+        if (publishGapMs > m_maxPosePublishGapMs)
+            m_maxPosePublishGapMs = publishGapMs;
+        m_previousPosePublishTime = now;
+        ++m_posePublishCount;
+
+        if (memcmp(m_previousTimingQuaternion, quaternion, sizeof(m_previousTimingQuaternion)) != 0) {
+            const double changeGapMs = std::chrono::duration<double, std::milli>(now - m_previousRotationChangeTime).count();
+            if (changeGapMs > m_maxRotationChangeGapMs)
+                m_maxRotationChangeGapMs = changeGapMs;
+            memcpy(m_previousTimingQuaternion, quaternion, sizeof(m_previousTimingQuaternion));
+            m_previousRotationChangeTime = now;
+            ++m_rotationChangeCount;
+        }
+
+        if (memcmp(m_previousTimingPosition, position, sizeof(m_previousTimingPosition)) != 0) {
+            const double changeGapMs = std::chrono::duration<double, std::milli>(now - m_previousPositionChangeTime).count();
+            if (changeGapMs > m_maxPositionChangeGapMs)
+                m_maxPositionChangeGapMs = changeGapMs;
+            memcpy(m_previousTimingPosition, position, sizeof(m_previousTimingPosition));
+            m_previousPositionChangeTime = now;
+            ++m_positionChangeCount;
+        }
+
+        const double reportSeconds = std::chrono::duration<double>(now - m_poseTimingReportStart).count();
+        if (reportSeconds < 1.0)
+            return;
+
+        DriverLog(
+            "driver_openhmd: HMD pose timing: publish %.1f Hz, rotation changes %.1f Hz, position changes %.1f Hz; max gaps publish %.3f ms, rotation %.3f ms, position %.3f ms\n",
+            m_posePublishCount / reportSeconds,
+            m_rotationChangeCount / reportSeconds,
+            m_positionChangeCount / reportSeconds,
+            m_maxPosePublishGapMs,
+            m_maxRotationChangeGapMs,
+            m_maxPositionChangeGapMs
+        );
+
+        m_poseTimingReportStart = now;
+        m_posePublishCount = 0;
+        m_rotationChangeCount = 0;
+        m_positionChangeCount = 0;
+        m_maxPosePublishGapMs = 0.0;
+        m_maxRotationChangeGapMs = 0.0;
+        m_maxPositionChangeGapMs = 0.0;
+    }
+
     void UpdateAngularAcceleration(const float angular_velocity[3], DriverPose_t& pose)
     {
         const auto now = std::chrono::steady_clock::now();
@@ -1219,6 +1287,19 @@ private:
     float m_previousAngularVelocity[3] = { 0.0f, 0.0f, 0.0f };
     double m_filteredAngularAcceleration[3] = { 0.0, 0.0, 0.0 };
     std::chrono::steady_clock::time_point m_previousAngularVelocityTime;
+    bool m_havePoseTimingSample = false;
+    float m_previousTimingQuaternion[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    float m_previousTimingPosition[3] = { 0.0f, 0.0f, 0.0f };
+    uint32_t m_posePublishCount = 0;
+    uint32_t m_rotationChangeCount = 0;
+    uint32_t m_positionChangeCount = 0;
+    double m_maxPosePublishGapMs = 0.0;
+    double m_maxRotationChangeGapMs = 0.0;
+    double m_maxPositionChangeGapMs = 0.0;
+    std::chrono::steady_clock::time_point m_poseTimingReportStart;
+    std::chrono::steady_clock::time_point m_previousPosePublishTime;
+    std::chrono::steady_clock::time_point m_previousRotationChangeTime;
+    std::chrono::steady_clock::time_point m_previousPositionChangeTime;
     float m_flSecondsFromVsyncToPhotons;
     float m_flDisplayFrequency;
     float m_flIPD;
@@ -1270,6 +1351,8 @@ EVRInitError CServerDriver_OpenHMD::Init( vr::IVRDriverContext *pDriverContext )
     VR_INIT_SERVER_DRIVER_CONTEXT( pDriverContext );
     InitDriverLog( vr::VRDriverLog() );
     LoadPoseOffsets();
+    g_logPoseTiming = vr::VRSettings()->GetBool(k_pch_Sample_Section, k_pch_Sample_LogPoseTiming_Bool);
+    DriverLog("driver_openhmd: Pose timing diagnostics: %s\n", g_logPoseTiming ? "enabled" : "disabled");
 
     ctx = ohmd_ctx_create();
     int num_devices = ohmd_ctx_probe(ctx);
@@ -1399,12 +1482,31 @@ void CServerDriver_OpenHMD::PoseThreadMain()
 
     constexpr auto poseInterval = std::chrono::milliseconds(2);
     auto nextPoseUpdate = std::chrono::steady_clock::now();
+    auto previousLoopStart = nextPoseUpdate;
+    auto timingReportStart = nextPoseUpdate;
+    uint32_t timingLoopCount = 0;
+    uint32_t timingDeadlineMisses = 0;
+    double maxLoopStartGapMs = 0.0;
+    double maxContextUpdateMs = 0.0;
+    double maxPublishWorkMs = 0.0;
 
     while (!m_poseThreadExit) {
+        const auto loopStart = std::chrono::steady_clock::now();
+        const double loopStartGapMs = std::chrono::duration<double, std::milli>(loopStart - previousLoopStart).count();
+        if (loopStartGapMs > maxLoopStartGapMs)
+            maxLoopStartGapMs = loopStartGapMs;
+        previousLoopStart = loopStart;
+        ++timingLoopCount;
+
         nextPoseUpdate += poseInterval;
 
+        const auto contextUpdateStart = std::chrono::steady_clock::now();
         if (ctx)
             ohmd_ctx_update(ctx);
+        const auto contextUpdateEnd = std::chrono::steady_clock::now();
+        const double contextUpdateMs = std::chrono::duration<double, std::milli>(contextUpdateEnd - contextUpdateStart).count();
+        if (contextUpdateMs > maxContextUpdateMs)
+            maxContextUpdateMs = contextUpdateMs;
 
         if (m_OpenHMDDeviceDriver)
             m_OpenHMDDeviceDriver->RunFrame();
@@ -1416,10 +1518,34 @@ void CServerDriver_OpenHMD::PoseThreadMain()
             m_OpenHMDDeviceDriverControllerR->RunFrame();
 
         const auto now = std::chrono::steady_clock::now();
+        const double publishWorkMs = std::chrono::duration<double, std::milli>(now - contextUpdateEnd).count();
+        if (publishWorkMs > maxPublishWorkMs)
+            maxPublishWorkMs = publishWorkMs;
+
         if (nextPoseUpdate > now)
             std::this_thread::sleep_until(nextPoseUpdate);
-        else
+        else {
             nextPoseUpdate = now;
+            ++timingDeadlineMisses;
+        }
+
+        const double reportSeconds = std::chrono::duration<double>(now - timingReportStart).count();
+        if (g_logPoseTiming && reportSeconds >= 1.0) {
+            DriverLog(
+                "driver_openhmd: Pose loop timing: %.1f Hz, %u deadline misses; max gaps loop %.3f ms, context %.3f ms, publish %.3f ms\n",
+                timingLoopCount / reportSeconds,
+                timingDeadlineMisses,
+                maxLoopStartGapMs,
+                maxContextUpdateMs,
+                maxPublishWorkMs
+            );
+            timingReportStart = now;
+            timingLoopCount = 0;
+            timingDeadlineMisses = 0;
+            maxLoopStartGapMs = 0.0;
+            maxContextUpdateMs = 0.0;
+            maxPublishWorkMs = 0.0;
+        }
     }
 
     DriverLog("Pose update thread exiting\n");

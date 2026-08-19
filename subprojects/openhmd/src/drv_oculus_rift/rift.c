@@ -578,10 +578,14 @@ static void update_hmd(rift_hmd_t *priv)
 	 * The automatic OpenHMD worker calls this at 1 kHz while holding the
 	 * context update mutex. Draining a continuously active CV1 for up to 5 ms
 	 * blocks pose readers and turns otherwise regular samples into bursts.
-	 * Two poll rounds per pass keep the critical section bounded while retaining
-	 * enough headroom to recover a short backlog above the hardware packet rate.
+	 * A short time budget keeps the critical section bounded while allowing the
+	 * worker to recover a queue built up during an OS scheduler delay.
 	 */
-	for (int poll_round = 0; poll_round < 2; poll_round++) {
+	const uint64_t poll_start = ohmd_monotonic_get(priv->ctx);
+	const uint64_t max_poll_time_ns = 500000;
+	const int max_poll_rounds = 16;
+
+	for (int poll_round = 0; poll_round < max_poll_rounds; poll_round++) {
 		bool got_a_msg = false;
 		int size;
 		uint64_t ts = ohmd_monotonic_get(priv->ctx);
@@ -613,6 +617,9 @@ static void update_hmd(rift_hmd_t *priv)
 		}
 
 		if (!got_a_msg)
+			break;
+
+		if (ohmd_monotonic_get(priv->ctx) - poll_start >= max_poll_time_ns)
 			break;
 	}
 }

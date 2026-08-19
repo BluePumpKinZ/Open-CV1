@@ -392,6 +392,21 @@ OHMD_APIENTRYDLL int OHMD_APIENTRY ohmd_device_getf(ohmd_device* device, ohmd_fl
 	return ret;
 }
 
+OHMD_APIENTRYDLL int OHMD_APIENTRY ohmd_device_getf_direct(ohmd_device* device, ohmd_float_value type, float* out)
+{
+	int ret = device->getf(device, type, out);
+	if(ret != OHMD_S_OK)
+		return ret;
+
+	if(type == OHMD_ROTATION_QUAT)
+		oquatf_mult_me((quatf*)out, &device->rotation_correction);
+	else if(type == OHMD_POSITION_VECTOR)
+		for(int i = 0; i < 3; i++)
+			out[i] += device->position_correction.arr[i];
+
+	return OHMD_S_OK;
+}
+
 static int ohmd_device_setf_unp(ohmd_device* device, ohmd_float_value type, const float* in)
 {
 	switch(type){

@@ -8,6 +8,7 @@
       "poseOffsetZ" : 0.0,
       "poseYawDegrees" : 0.0,
       "logPoseTiming" : false,
+      "enableHaptics" : false,
       "synthesizeAngularAcceleration" : true
    }
 }

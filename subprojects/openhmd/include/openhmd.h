@@ -435,6 +435,11 @@ OHMD_APIENTRYDLL int OHMD_APIENTRY ohmd_close_device(ohmd_device* device);
  **/
 OHMD_APIENTRYDLL int OHMD_APIENTRY ohmd_device_getf(ohmd_device* device, ohmd_float_value type, float* out);
 
+/** Read a dynamic value directly from a driver that provides its own locking.
+ * This avoids waiting for the context update mutex, but must only be used with
+ * drivers whose getf implementation is internally thread-safe. */
+OHMD_APIENTRYDLL int OHMD_APIENTRY ohmd_device_getf_direct(ohmd_device* device, ohmd_float_value type, float* out);
+
 /**
  * Set a floating point value for a device.
  *

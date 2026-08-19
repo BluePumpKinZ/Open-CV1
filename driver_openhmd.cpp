@@ -78,6 +78,7 @@ static const char * const k_pch_Sample_PoseOffsetZ_Float = "poseOffsetZ";
 static const char * const k_pch_Sample_PoseYawDegrees_Float = "poseYawDegrees";
 static const char * const k_pch_Sample_SynthesizeAngularAcceleration_Bool = "synthesizeAngularAcceleration";
 static const char * const k_pch_Sample_LogPoseTiming_Bool = "logPoseTiming";
+static const char * const k_pch_Sample_EnableHaptics_Bool = "enableHaptics";
 
 HmdQuaternion_t identityquat{ 1, 0, 0, 0};
 
@@ -91,6 +92,8 @@ struct PoseOffsets
 
 static PoseOffsets g_poseOffsets{0.0f, 0.0f, 0.0f, 0.0f};
 static bool g_logPoseTiming = false;
+static bool g_useDirectPoseReads = false;
+static bool g_enableHaptics = true;
 
 static HmdQuaternion_t MakeYawQuaternion(float degrees)
 {
@@ -237,7 +240,7 @@ public:
     bool m_is_oculus;
 
     COpenHMDDeviceDriverController(int index, ohmd_device* _device, int _device_idx) :
-		index(index), device(_device), device_idx(_device_idx) {
+		index(index), device(_device), device_idx(_device_idx), m_is_oculus(false) {
         DriverLog("construct controller object %d (OpenHMD device %d)\n", index, device_idx);
         m_unObjectId = vr::k_unTrackedDeviceIndexInvalid;
         pose = { 0 };
@@ -406,7 +409,7 @@ public:
         }
 
 #ifdef OHMD_HAVE_HAPTICS_API_v0
-        if (device_flags & OHMD_DEVICE_FLAGS_HAPTIC_FEEDBACK) {
+        if (g_enableHaptics && (device_flags & OHMD_DEVICE_FLAGS_HAPTIC_FEEDBACK)) {
           vr::VRDriverInput()->CreateHapticComponent( m_ulPropertyContainer, "/output/haptic", &m_hapticControl);
         }
         else {
@@ -459,7 +462,7 @@ public:
 
 	if (device_flags & OHMD_DEVICE_FLAGS_ROTATIONAL_TRACKING) {
 		float quat[4];
-		ohmd_device_getf(device, OHMD_ROTATION_QUAT, quat);
+		GetPoseFloat(OHMD_ROTATION_QUAT, quat);
 		pose.qRotation.x = quat[0];
 		pose.qRotation.y = quat[1];
 		pose.qRotation.z = quat[2];
@@ -467,7 +470,7 @@ public:
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v1
 		float ang_vel[3];
-		if (ohmd_device_getf(device, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
+		if (GetPoseFloat(OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
 			pose.vecAngularVelocity[0] = ang_vel[0];
 			pose.vecAngularVelocity[1] = ang_vel[1];
 			pose.vecAngularVelocity[2] = ang_vel[2];
@@ -477,19 +480,19 @@ public:
 
 	if (device_flags & OHMD_DEVICE_FLAGS_POSITIONAL_TRACKING) {
 		float pos[3];
-		ohmd_device_getf(device, OHMD_POSITION_VECTOR, pos);
+		GetPoseFloat(OHMD_POSITION_VECTOR, pos);
 		pose.vecPosition[0] = pos[0];
 		pose.vecPosition[1] = pos[1];
 		pose.vecPosition[2] = pos[2];
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v0
 		float vel[3], accel[3];
-		if (ohmd_device_getf(device, OHMD_VELOCITY_VECTOR, vel) == 0) {
+		if (GetPoseFloat(OHMD_VELOCITY_VECTOR, vel) == 0) {
 			pose.vecVelocity[0] = vel[0];
 			pose.vecVelocity[1] = vel[1];
 			pose.vecVelocity[2] = vel[2];
 		}
-		if (ohmd_device_getf(device, OHMD_ACCELERATION_VECTOR, accel) == 0) {
+		if (GetPoseFloat(OHMD_ACCELERATION_VECTOR, accel) == 0) {
 			pose.vecAcceleration[0] = accel[0];
 			pose.vecAcceleration[1] = accel[1];
 			pose.vecAcceleration[2] = accel[2];
@@ -520,9 +523,11 @@ public:
 	return pose;
     }
 
-    void RunFrame() {
+    void RunPoseFrame() {
         vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_unObjectId, GetPose(), sizeof( DriverPose_t ) );
+    }
 
+    void RunInputFrame() {
         int control_count;
         float control_state[256];
 
@@ -585,6 +590,11 @@ public:
     }
 
 private:
+    int GetPoseFloat(ohmd_float_value type, float* out)
+    {
+        return m_is_oculus ? ohmd_device_getf_direct(device, type, out) : ohmd_device_getf(device, type, out);
+    }
+
     std::string m_sSerialNumber = "Controller serial number " + std::to_string(index);
     std::string m_sModelNumber = "Controller model number " + std::to_string(index);
     vr::TrackedDeviceIndex_t m_unObjectId;
@@ -610,6 +620,10 @@ public:
 	    hmdtracker = ohmd_list_open_device(ctx, hmdtracker_idx);
 	else
 	    hmdtracker = NULL;
+
+        const int tracker_idx = hmdtracker ? hmdtracker_idx : hmddisplay_idx;
+        m_isOculus = strcmp(ohmd_list_gets(ctx, tracker_idx, OHMD_VENDOR), "Oculus VR, Inc.") == 0;
+        g_useDirectPoseReads = m_isOculus;
 
         if(!hmd){
             DriverLog("failed to open device: %s\n", ohmd_ctx_get_error(ctx));
@@ -690,6 +704,7 @@ public:
         DriverLog( "driver_openhmd: Seconds from Vsync to Photons: %f\n", m_flSecondsFromVsyncToPhotons );
                                                 DriverLog( "driver_openhmd: Display Frequency: %f\n", m_flDisplayFrequency );
         DriverLog( "driver_openhmd: Synthesized angular acceleration: %s\n", m_synthesizeAngularAcceleration ? "enabled" : "disabled" );
+        DriverLog( "driver_openhmd: Direct CV1 pose reads: %s\n", m_isOculus ? "enabled" : "disabled" );
         DriverLog( "driver_openhmd: IPD: %f\n", m_flIPD );
 
         float distortion_coeffs[4];
@@ -1088,26 +1103,26 @@ public:
         ohmd_device* d = hmdtracker ? hmdtracker : hmd;
 
         float quat[4];
-        ohmd_device_getf(d, OHMD_ROTATION_QUAT, quat);
+        GetPoseFloat(d, OHMD_ROTATION_QUAT, quat);
         pose.qRotation.x = quat[0];
         pose.qRotation.y = quat[1];
         pose.qRotation.z = quat[2];
         pose.qRotation.w = quat[3];
 
         float pos[3];
-        ohmd_device_getf(d, OHMD_POSITION_VECTOR, pos);
+        GetPoseFloat(d, OHMD_POSITION_VECTOR, pos);
         pose.vecPosition[0] = pos[0];
         pose.vecPosition[1] = pos[1];
         pose.vecPosition[2] = pos[2];
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v0
 	float vel[3], accel[3];
-	if (ohmd_device_getf(d, OHMD_VELOCITY_VECTOR, vel) == 0) {
+	if (GetPoseFloat(d, OHMD_VELOCITY_VECTOR, vel) == 0) {
 		pose.vecVelocity[0] = vel[0];
 		pose.vecVelocity[1] = vel[1];
 		pose.vecVelocity[2] = vel[2];
 	}
-	if (ohmd_device_getf(d, OHMD_ACCELERATION_VECTOR, accel) == 0) {
+	if (GetPoseFloat(d, OHMD_ACCELERATION_VECTOR, accel) == 0) {
 		pose.vecAcceleration[0] = accel[0];
 		pose.vecAcceleration[1] = accel[1];
 		pose.vecAcceleration[2] = accel[2];
@@ -1116,7 +1131,7 @@ public:
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v1
         float ang_vel[3];
-        if (ohmd_device_getf(d, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
+        if (GetPoseFloat(d, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
                 pose.vecAngularVelocity[0] = ang_vel[0];
                 pose.vecAngularVelocity[1] = ang_vel[1];
                 pose.vecAngularVelocity[2] = ang_vel[2];
@@ -1154,6 +1169,11 @@ public:
     std::string GetSerialNumber() const { return m_sSerialNumber; }
 
 private:
+    int GetPoseFloat(ohmd_device* device, ohmd_float_value type, float* out)
+    {
+        return m_isOculus ? ohmd_device_getf_direct(device, type, out) : ohmd_device_getf(device, type, out);
+    }
+
     void RecordPoseTiming(const float quaternion[4], const float position[3])
     {
         if (!g_logPoseTiming)
@@ -1283,6 +1303,7 @@ private:
     int32_t m_nRenderWidth;
     int32_t m_nRenderHeight;
     bool m_synthesizeAngularAcceleration = false;
+    bool m_isOculus = false;
     bool m_haveAngularVelocitySample = false;
     float m_previousAngularVelocity[3] = { 0.0f, 0.0f, 0.0f };
     double m_filteredAngularAcceleration[3] = { 0.0, 0.0, 0.0 };
@@ -1352,7 +1373,9 @@ EVRInitError CServerDriver_OpenHMD::Init( vr::IVRDriverContext *pDriverContext )
     InitDriverLog( vr::VRDriverLog() );
     LoadPoseOffsets();
     g_logPoseTiming = vr::VRSettings()->GetBool(k_pch_Sample_Section, k_pch_Sample_LogPoseTiming_Bool);
+    g_enableHaptics = vr::VRSettings()->GetBool(k_pch_Sample_Section, k_pch_Sample_EnableHaptics_Bool);
     DriverLog("driver_openhmd: Pose timing diagnostics: %s\n", g_logPoseTiming ? "enabled" : "disabled");
+    DriverLog("driver_openhmd: Controller haptics: %s\n", g_enableHaptics ? "enabled" : "disabled");
 
     ctx = ohmd_ctx_create();
     int num_devices = ohmd_ctx_probe(ctx);
@@ -1458,6 +1481,11 @@ void CServerDriver_OpenHMD::RunFrame()
             m_OpenHMDDeviceDriverControllerR->ProcessEvent( vrEvent );
     }
 
+    if (m_OpenHMDDeviceDriverControllerL)
+        m_OpenHMDDeviceDriverControllerL->RunInputFrame();
+    if (m_OpenHMDDeviceDriverControllerR)
+        m_OpenHMDDeviceDriverControllerR->RunInputFrame();
+
 }
 
 void CServerDriver_OpenHMD::StartPoseThread()
@@ -1501,7 +1529,7 @@ void CServerDriver_OpenHMD::PoseThreadMain()
         nextPoseUpdate += poseInterval;
 
         const auto contextUpdateStart = std::chrono::steady_clock::now();
-        if (ctx)
+        if (ctx && !g_useDirectPoseReads)
             ohmd_ctx_update(ctx);
         const auto contextUpdateEnd = std::chrono::steady_clock::now();
         const double contextUpdateMs = std::chrono::duration<double, std::milli>(contextUpdateEnd - contextUpdateStart).count();
@@ -1512,10 +1540,10 @@ void CServerDriver_OpenHMD::PoseThreadMain()
             m_OpenHMDDeviceDriver->RunFrame();
 
         if (m_OpenHMDDeviceDriverControllerL)
-            m_OpenHMDDeviceDriverControllerL->RunFrame();
+            m_OpenHMDDeviceDriverControllerL->RunPoseFrame();
 
         if (m_OpenHMDDeviceDriverControllerR)
-            m_OpenHMDDeviceDriverControllerR->RunFrame();
+            m_OpenHMDDeviceDriverControllerR->RunPoseFrame();
 
         const auto now = std::chrono::steady_clock::now();
         const double publishWorkMs = std::chrono::duration<double, std::milli>(now - contextUpdateEnd).count();

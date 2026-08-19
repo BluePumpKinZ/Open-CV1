@@ -76,6 +76,7 @@ static const char * const k_pch_Sample_PoseOffsetX_Float = "poseOffsetX";
 static const char * const k_pch_Sample_PoseOffsetY_Float = "poseOffsetY";
 static const char * const k_pch_Sample_PoseOffsetZ_Float = "poseOffsetZ";
 static const char * const k_pch_Sample_PoseYawDegrees_Float = "poseYawDegrees";
+static const char * const k_pch_Sample_SynthesizeAngularAcceleration_Bool = "synthesizeAngularAcceleration";
 
 HmdQuaternion_t identityquat{ 1, 0, 0, 0};
 
@@ -675,6 +676,9 @@ public:
         m_flSecondsFromVsyncToPhotons = vr::VRSettings()->GetFloat( k_pch_Sample_Section, k_pch_Sample_SecondsFromVsyncToPhotons_Float );
         //TODO: find actual frequency somehow (from openhmd?)
         m_flDisplayFrequency = vr::VRSettings()->GetFloat( k_pch_Sample_Section, k_pch_Sample_DisplayFrequency_Float );
+        m_synthesizeAngularAcceleration = vr::VRSettings()->GetBool(
+            k_pch_Sample_Section, k_pch_Sample_SynthesizeAngularAcceleration_Bool
+        );
 
         DriverLog( "driver_openhmd: Vendor: %s\n", m_sVendor.c_str() );
         DriverLog( "driver_openhmd: Serial Number: %s\n", m_sSerialNumber.c_str() );
@@ -683,6 +687,7 @@ public:
         DriverLog( "driver_openhmd: Render Target: %d %d\n", m_nRenderWidth, m_nRenderHeight );
         DriverLog( "driver_openhmd: Seconds from Vsync to Photons: %f\n", m_flSecondsFromVsyncToPhotons );
                                                 DriverLog( "driver_openhmd: Display Frequency: %f\n", m_flDisplayFrequency );
+        DriverLog( "driver_openhmd: Synthesized angular acceleration: %s\n", m_synthesizeAngularAcceleration ? "enabled" : "disabled" );
         DriverLog( "driver_openhmd: IPD: %f\n", m_flIPD );
 
         float distortion_coeffs[4];
@@ -1113,6 +1118,8 @@ public:
                 pose.vecAngularVelocity[0] = ang_vel[0];
                 pose.vecAngularVelocity[1] = ang_vel[1];
                 pose.vecAngularVelocity[2] = ang_vel[2];
+                if (m_synthesizeAngularAcceleration)
+                    UpdateAngularAcceleration(ang_vel, pose);
         }
 #endif
 
@@ -1143,6 +1150,54 @@ public:
     std::string GetSerialNumber() const { return m_sSerialNumber; }
 
 private:
+    void UpdateAngularAcceleration(const float angular_velocity[3], DriverPose_t& pose)
+    {
+        const auto now = std::chrono::steady_clock::now();
+
+        if (!m_haveAngularVelocitySample) {
+            for (int i = 0; i < 3; ++i)
+                m_previousAngularVelocity[i] = angular_velocity[i];
+            m_previousAngularVelocityTime = now;
+            m_haveAngularVelocitySample = true;
+            return;
+        }
+
+        const double seconds = std::chrono::duration<double>(now - m_previousAngularVelocityTime).count();
+        if (seconds < (1.0 / 120.0)) {
+            for (int i = 0; i < 3; ++i)
+                pose.vecAngularAcceleration[i] = m_filteredAngularAcceleration[i];
+            return;
+        }
+
+        if (seconds > 0.05) {
+            // Do not turn a scheduling pause into a large prediction impulse.
+            for (int i = 0; i < 3; ++i)
+                m_filteredAngularAcceleration[i] = 0.0;
+        } else {
+            double acceleration[3];
+            double magnitude_squared = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                acceleration[i] = (angular_velocity[i] - m_previousAngularVelocity[i]) / seconds;
+                magnitude_squared += acceleration[i] * acceleration[i];
+            }
+
+            const double maximum_acceleration = 80.0;
+            const double magnitude = sqrt(magnitude_squared);
+            const double scale = magnitude > maximum_acceleration ? maximum_acceleration / magnitude : 1.0;
+            const double filter_weight = 0.25;
+            for (int i = 0; i < 3; ++i) {
+                const double bounded_acceleration = acceleration[i] * scale;
+                m_filteredAngularAcceleration[i] += filter_weight * (bounded_acceleration - m_filteredAngularAcceleration[i]);
+            }
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            m_previousAngularVelocity[i] = angular_velocity[i];
+            pose.vecAngularAcceleration[i] = m_filteredAngularAcceleration[i];
+        }
+        m_previousAngularVelocityTime = now;
+    }
+
     ohmd_device* hmd = NULL;
     ohmd_device* hmdtracker = NULL;
 
@@ -1159,6 +1214,11 @@ private:
     int32_t m_nWindowHeight;
     int32_t m_nRenderWidth;
     int32_t m_nRenderHeight;
+    bool m_synthesizeAngularAcceleration = false;
+    bool m_haveAngularVelocitySample = false;
+    float m_previousAngularVelocity[3] = { 0.0f, 0.0f, 0.0f };
+    double m_filteredAngularAcceleration[3] = { 0.0, 0.0, 0.0 };
+    std::chrono::steady_clock::time_point m_previousAngularVelocityTime;
     float m_flSecondsFromVsyncToPhotons;
     float m_flDisplayFrequency;
     float m_flIPD;

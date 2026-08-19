@@ -100,6 +100,12 @@ For the tested Beat Saber setup:
 - keep Linux Vulkan async disabled; it caused substantially worse frame pacing on this CV1 setup
 - SteamVR Home is disabled by the installer to keep the VR session lighter
 
+The driver synthesizes angular acceleration from the CV1's valid angular
+velocity stream. This is enabled by default and is bounded and filtered to
+avoid prediction spikes. To compare without it, set
+`driver_openhmd.synthesizeAngularAcceleration` to `false` in
+`steamvr.vrsettings`, then restart SteamVR.
+
 Proton games obtain the SteamVR OpenXR runtime through SteamVR. There is no
 separate system OpenXR JSON file to install for this setup. If Beat Saber says
 the OpenXR runtime is missing, close the game, start SteamVR first, wait until

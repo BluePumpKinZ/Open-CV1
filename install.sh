@@ -78,6 +78,7 @@ driver_openhmd.setdefault("poseOffsetX", 0.0)
 driver_openhmd.setdefault("poseOffsetY", 0.0)
 driver_openhmd.setdefault("poseOffsetZ", 0.0)
 driver_openhmd.setdefault("poseYawDegrees", 0.0)
+driver_openhmd["synthesizeAngularAcceleration"] = True
 driver_openhmd.pop("blocked_by_safe_mode", None)
 
 steamvr = data.setdefault("steamvr", {})

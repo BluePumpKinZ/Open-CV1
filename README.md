@@ -106,6 +106,24 @@ avoid prediction spikes. To compare without it, set
 `driver_openhmd.synthesizeAngularAcceleration` to `false` in
 `steamvr.vrsettings`, then restart SteamVR.
 
+### Prediction timing trials
+
+The compositor exposes a runtime-only timing offset for testing the final
+vsync-to-photon prediction horizon. The default `0 ms` offset keeps the
+driver's `0.011 s` 90 Hz value unchanged. With SteamVR running, compare one
+setting at a time while moving your head in Beat Saber:
+
+```bash
+~/bin/set-steamvr-photon-offset.sh --offset 0
+~/bin/set-steamvr-photon-offset.sh --offset 0.5
+~/bin/set-steamvr-photon-offset.sh --offset -0.5
+~/bin/set-steamvr-photon-offset.sh --reset
+```
+
+The command does not alter SteamVR configuration and resets when SteamVR
+exits. Keep trials within `+/-3 ms`; a wrong value can make head motion feel
+worse.
+
 Proton games obtain the SteamVR OpenXR runtime through SteamVR. There is no
 separate system OpenXR JSON file to install for this setup. If Beat Saber says
 the OpenXR runtime is missing, close the game, start SteamVR first, wait until

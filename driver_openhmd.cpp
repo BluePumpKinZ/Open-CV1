@@ -1397,12 +1397,7 @@ void CServerDriver_OpenHMD::PoseThreadMain()
 {
     DriverLog("Starting pose update thread\n");
 
-    constexpr auto poseInterval = std::chrono::milliseconds(2);
-    auto nextPoseUpdate = std::chrono::steady_clock::now();
-
     while (!m_poseThreadExit) {
-        nextPoseUpdate += poseInterval;
-
         if (ctx)
             ohmd_ctx_update(ctx);
 
@@ -1415,11 +1410,7 @@ void CServerDriver_OpenHMD::PoseThreadMain()
         if (m_OpenHMDDeviceDriverControllerR)
             m_OpenHMDDeviceDriverControllerR->RunFrame();
 
-        const auto now = std::chrono::steady_clock::now();
-        if (nextPoseUpdate > now)
-            std::this_thread::sleep_until(nextPoseUpdate);
-        else
-            nextPoseUpdate = now;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     DriverLog("Pose update thread exiting\n");

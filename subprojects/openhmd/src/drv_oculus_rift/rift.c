@@ -559,6 +559,7 @@ static void check_haptics_state(rift_hmd_t *hmd, uint64_t ts, rift_touch_control
 static void update_hmd(rift_hmd_t *priv)
 {
 	unsigned char buffer[FEATURE_BUFFER_SIZE];
+	bool got_a_msg = false;
 	uint64_t start = ohmd_monotonic_get(priv->ctx);
 
 	// Handle keep alive messages
@@ -574,21 +575,13 @@ static void update_hmd(rift_hmd_t *priv)
 	check_haptics_state(priv, start, &priv->touch_dev[0]);
 	check_haptics_state(priv, start, &priv->touch_dev[1]);
 
-	/*
-	 * The automatic OpenHMD worker calls this at 1 kHz while holding the
-	 * context update mutex. Draining a continuously active CV1 for up to 5 ms
-	 * blocks pose readers and turns otherwise regular samples into bursts.
-	 * A short time budget keeps the critical section bounded while allowing the
-	 * worker to recover a queue built up during an OS scheduler delay.
-	 */
-	const uint64_t poll_start = ohmd_monotonic_get(priv->ctx);
-	const uint64_t max_poll_time_ns = 500000;
-	const int max_poll_rounds = 16;
-
-	for (int poll_round = 0; poll_round < max_poll_rounds; poll_round++) {
-		bool got_a_msg = false;
+	// Read all the messages from the device.
+	do {
 		int size;
+		/* FIXME: Collect all HID messages that are pending, then work backward to calculate capture timestamps? */
 		uint64_t ts = ohmd_monotonic_get(priv->ctx);
+
+		got_a_msg = false;
 
 		size = hid_read(priv->handle, buffer, FEATURE_BUFFER_SIZE);
 		if(size < 0){
@@ -605,23 +598,30 @@ static void update_hmd(rift_hmd_t *priv)
 			}
 		}
 
-		if (priv->radio_handle != NULL) {
-			size = hid_read(priv->radio_handle, buffer, FEATURE_BUFFER_SIZE);
-			if(size < 0){
-				LOGE("error reading from controllers");
-				break;
-			} else if(size > 0 && buffer[0] == RIFT_RADIO_REPORT_ID) {
+		if (priv->radio_handle == NULL)
+			continue;
+
+		// Read all the controller messages from the radio device.
+		size = hid_read(priv->radio_handle, buffer, FEATURE_BUFFER_SIZE);
+		if(size < 0){
+			LOGE("error reading from controllers");
+			break;
+		} else if(size > 0) {
+			if (buffer[0] == RIFT_RADIO_REPORT_ID) {
 				handle_rift_radio_report (priv, ts, buffer, size);
 				got_a_msg = true;
+				ts = ohmd_monotonic_get(priv->ctx);
 			}
 		}
 
-		if (!got_a_msg)
-			break;
 
-		if (ohmd_monotonic_get(priv->ctx) - poll_start >= max_poll_time_ns)
-			break;
-	}
+		/* Don't loop for more than 5ms, or the app doesn't get a chance to draw anything */
+		if (got_a_msg) {
+			uint64_t now = ohmd_monotonic_get(priv->ctx);
+			if (now - start > 5000000)
+				break;
+		}
+	} while(got_a_msg);
 }
 
 static void update_device(ohmd_device* device)

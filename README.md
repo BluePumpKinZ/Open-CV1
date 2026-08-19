@@ -106,6 +106,9 @@ avoid prediction spikes. To compare without it, set
 `driver_openhmd.synthesizeAngularAcceleration` to `false` in
 `steamvr.vrsettings`, then restart SteamVR.
 
+Controller vibration is enabled by default. For controller radio diagnosis,
+it can be disabled independently with `driver_openhmd.enableHaptics`.
+
 ### Prediction timing trials
 
 The compositor exposes a runtime-only timing offset for testing the final

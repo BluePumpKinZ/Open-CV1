@@ -537,4 +537,5 @@ void rift_touch_cancel_in_progress(rift_hmd_radio_state *radio, int device_id)
 
 	radio->device_in_progress = -1;
 	radio->cur_read_cmd = RIFT_RADIO_CMD_NONE;
+	radio->command_result_pending = false;
 }

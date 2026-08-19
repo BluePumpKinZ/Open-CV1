@@ -518,40 +518,65 @@ static void handle_rift_radio_report(rift_hmd_t* hmd, uint64_t ts, unsigned char
 
 static void check_haptics_state(rift_hmd_t *hmd, uint64_t ts, rift_touch_controller_t *touch)
 {
+		rift_haptic_state *state = &touch->haptic_state;
+		const uint64_t command_timeout = ohmd_monotonic_per_sec(hmd->ctx) / 20;
+
 		/* Check if we need to clear the active haptic event */
-		if (touch->haptic_state.haptics_on && touch->haptic_state.end_time < ts) {
-			touch->haptic_state.haptics_on = false;
-			touch->haptic_state.dirty = true;
+		if (state->haptics_on && !state->in_progress && !state->dirty && state->end_time < ts) {
+			state->haptics_on = false;
+			state->dirty = true;
 		}
 
-		/* Check if we're trying / need to send the haptic state to the controller */
-		if (touch->haptic_state.dirty || touch->haptic_state.in_progress) {
+		/* Finish the active write before sending a newer coalesced request. */
+		if (state->in_progress) {
 			uint8_t amplitude = 0;
-			int ret;
+			if (state->haptics_on)
+				amplitude = state->amplitude;
 
-			if (touch->haptic_state.haptics_on)
-				amplitude = touch->haptic_state.amplitude;
-
-			if (touch->haptic_state.dirty && touch->haptic_state.in_progress)
+			if (ts - state->command_start_time > command_timeout) {
+				LOGW("Haptic radio command timed out for device %d", touch->device_num);
 				rift_touch_cancel_in_progress(&hmd->radio, touch->device_num);
-			touch->haptic_state.dirty = false;
-
-			ret = rift_touch_send_haptics(&hmd->radio, touch->device_num, touch->haptic_state.low_freq, amplitude);
-			if (ret == 0) {
-				/* Radio message was successfully sent, calculate the end time */
-				LOGD("Haptics sent, dev %d %s freq amplitude %u\n", touch->device_num, touch->haptic_state.low_freq ? "low" : "high", amplitude);
-				touch->haptic_state.in_progress = false;
-				if (touch->haptic_state.haptics_on) {
-					float duration = touch->haptic_state.duration;
-					touch->haptic_state.end_time = ts + roundf(duration * ohmd_monotonic_per_sec(hmd->ctx));
-				}
+				state->in_progress = false;
+				state->command_start_time = 0;
+				state->dirty = true;
+				return;
 			}
-			else if (ret == -EINPROGRESS || ret == -EBUSY) {
-				touch->haptic_state.in_progress = true;
-			} else {
-				/* For any other errors, cancel any on-going transmission */
+
+			int ret = rift_touch_send_haptics(&hmd->radio, touch->device_num, state->low_freq, amplitude);
+			if (ret == 0) {
+				state->in_progress = false;
+				state->command_start_time = 0;
+				if (!state->dirty && state->haptics_on)
+					state->end_time = ts + roundf(state->duration * ohmd_monotonic_per_sec(hmd->ctx));
+			}
+			else if (ret != -EINPROGRESS && ret != -EBUSY) {
 				rift_touch_cancel_in_progress(&hmd->radio, touch->device_num);
-				touch->haptic_state.in_progress = false;
+				state->in_progress = false;
+				state->command_start_time = 0;
+			}
+			return;
+		}
+
+		if (state->dirty) {
+			uint8_t amplitude = state->haptics_on ? state->amplitude : 0;
+			state->dirty = false;
+
+			int ret = rift_touch_send_haptics(&hmd->radio, touch->device_num, state->low_freq, amplitude);
+			if (ret == 0) {
+				LOGD("Haptics sent, dev %d %s freq amplitude %u\n", touch->device_num, state->low_freq ? "low" : "high", amplitude);
+				if (state->haptics_on)
+					state->end_time = ts + roundf(state->duration * ohmd_monotonic_per_sec(hmd->ctx));
+			}
+			else if (ret == -EINPROGRESS) {
+				state->in_progress = true;
+				state->command_start_time = ts;
+			}
+			else if (ret == -EBUSY) {
+				/* The other controller owns the radio; retry this request later. */
+				state->dirty = true;
+			}
+			else {
+				rift_touch_cancel_in_progress(&hmd->radio, touch->device_num);
 			}
 		}
 }
@@ -815,13 +840,25 @@ static int set_touch_haptics(ohmd_device *device, bool enable, float duration, f
 	 * in the update loop */
 	LOGD("New Haptics event, dev %d duration %f freq %f amplitude %f\n", touch->device_num, duration, frequency, amplitude);
 	if (enable) {
-			touch->haptic_state.haptics_on = true;
-			touch->haptic_state.dirty = true;
-			touch->haptic_state.low_freq = (frequency <= 160.0);
-			touch->haptic_state.amplitude = roundf(0xff * amplitude);
-			touch->haptic_state.duration = OHMD_MAX(duration, MIN_HAPTIC_DURATION);
+		const bool low_freq = frequency <= 160.0;
+		const uint8_t byte_amplitude = roundf(0xff * amplitude);
+		const float pulse_duration = OHMD_MAX(duration, MIN_HAPTIC_DURATION);
+		const bool changed = !touch->haptic_state.haptics_on ||
+			touch->haptic_state.low_freq != low_freq ||
+			touch->haptic_state.amplitude != byte_amplitude;
 
+		touch->haptic_state.haptics_on = true;
+		touch->haptic_state.low_freq = low_freq;
+		touch->haptic_state.amplitude = byte_amplitude;
+		touch->haptic_state.duration = pulse_duration;
+		if (changed) {
+			touch->haptic_state.dirty = true;
 			touch->haptic_state.end_time = (uint64_t)(-1);
+		}
+		else if (!touch->haptic_state.in_progress) {
+			uint64_t now = ohmd_monotonic_get(dev_priv->hmd->ctx);
+			touch->haptic_state.end_time = now + roundf(pulse_duration * ohmd_monotonic_per_sec(dev_priv->hmd->ctx));
+		}
 	}
 	else if (touch->haptic_state.haptics_on) {
 			touch->haptic_state.haptics_on = false;

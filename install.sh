@@ -80,7 +80,7 @@ driver_openhmd.setdefault("poseOffsetY", 0.0)
 driver_openhmd.setdefault("poseOffsetZ", 0.0)
 driver_openhmd.setdefault("poseYawDegrees", 0.0)
 driver_openhmd.setdefault("logPoseTiming", False)
-driver_openhmd["enableHaptics"] = False
+driver_openhmd["enableHaptics"] = True
 driver_openhmd["synthesizeAngularAcceleration"] = True
 driver_openhmd.pop("blocked_by_safe_mode", None)
 

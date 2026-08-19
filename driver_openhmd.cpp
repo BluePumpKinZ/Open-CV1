@@ -1108,16 +1108,11 @@ public:
 #endif
 
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v1
-        float ang_vel[3], ang_accel[3];
+        float ang_vel[3];
         if (ohmd_device_getf(d, OHMD_ANGULAR_VELOCITY_VECTOR, ang_vel) == 0) {
                 pose.vecAngularVelocity[0] = ang_vel[0];
                 pose.vecAngularVelocity[1] = ang_vel[1];
                 pose.vecAngularVelocity[2] = ang_vel[2];
-        }
-        if (ohmd_device_getf(d, OHMD_ANGULAR_ACCELERATION_VECTOR, ang_accel) == 0) {
-                pose.vecAngularAcceleration[0] = ang_accel[0];
-                pose.vecAngularAcceleration[1] = ang_accel[1];
-                pose.vecAngularAcceleration[2] = ang_accel[2];
         }
 #endif
 

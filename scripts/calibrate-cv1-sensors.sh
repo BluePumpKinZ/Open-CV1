@@ -3,7 +3,6 @@
 set -euo pipefail
 
 CONFIG_DIR="${HOME}/.config/openhmd"
-LAUNCHER="${HOME}/bin/start-steamvr-openhmd.sh"
 
 cache_files() {
     shopt -s nullglob
@@ -61,32 +60,42 @@ reset_cache() {
     mkdir -p "${CONFIG_DIR}"
     mapfile -t files < <(cache_files)
     if [[ ${#files[@]} -gt 0 ]]; then
+        local backup_dir="${CONFIG_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
+        mkdir -p "${backup_dir}"
+        cp -a "${files[@]}" "${backup_dir}/"
+        echo "Backed up cached CV1 sensor poses to ${backup_dir}."
         rm -f "${files[@]}"
     fi
     echo "Cleared cached CV1 sensor poses from ${CONFIG_DIR}."
 }
 
-launch_and_relearn() {
-    pkill -TERM -x vrserver 2>/dev/null || true
-    pkill -TERM -x vrcompositor 2>/dev/null || true
-    pkill -TERM -x vrmonitor 2>/dev/null || true
-    pkill -TERM -x vrdashboard 2>/dev/null || true
-    nohup "${LAUNCHER}" >/tmp/open-cv1-calibration-launch.log 2>&1 &
+wait_for_relearn() {
+    local max_wait_seconds=30
+    local elapsed=0
+    local expected_cache_count=2
+    local last_cache_count=-1
 
-    echo "SteamVR relaunched. Wear the headset and slowly move it through the tracked volume for 15-20 seconds."
-    echo "Waiting for sensor pose caches to appear..."
+    echo "Start SteamVR manually now. Put the headset at the center of the play area, facing forward."
+    echo "Keep the headset and both sensors completely still until both sensor pose caches are saved."
+    echo "Waiting for ${expected_cache_count} sensor pose caches to appear..."
 
-    for _ in $(seq 1 30); do
+    while (( elapsed < max_wait_seconds )); do
         mapfile -t files < <(cache_files)
-        if [[ ${#files[@]} -gt 0 ]]; then
-            echo "Detected saved sensor poses:"
+        if (( ${#files[@]} != last_cache_count )); then
+            echo "Detected ${#files[@]}/${expected_cache_count} saved sensor pose caches."
+            last_cache_count=${#files[@]}
+        fi
+
+        if (( ${#files[@]} >= expected_cache_count )); then
+            echo "Both sensor poses are saved. Calibration complete:"
             show_cache
             return 0
         fi
         sleep 1
+        ((elapsed += 1))
     done
 
-    echo "No sensor pose caches appeared within 30 seconds."
+    echo "Only ${last_cache_count}/${expected_cache_count} sensor pose caches appeared within 30 seconds."
     echo "Check ~/.local/share/Steam/logs/vrserver.txt for 'Loaded sensor' or 'Saved sensor' log lines."
     return 1
 }
@@ -149,7 +158,7 @@ Usage:
 Actions:
   --show                Print saved CV1 sensor pose caches.
   --reset               Remove saved CV1 sensor pose caches.
-  --relearn             Remove saved caches, restart SteamVR, and wait for new sensor poses to be learned.
+  --relearn             Remove saved caches and wait for you to start SteamVR manually.
   --set                 Write a full sensor pose cache for one sensor serial.
   --set-pos             Update only a sensor position and keep its saved orientation.
   --offset              Apply a uniform translation to every saved sensor position.
@@ -157,6 +166,9 @@ Actions:
 Notes:
   Cached poses are stored as quaternion + position in:
     ~/.config/openhmd/rift-sensor-pose-<serial>.txt
+  --relearn requires SteamVR to be closed first. It backs up and clears existing
+  caches, then waits for you to start SteamVR manually. Keep the headset and
+  sensors still until two new sensor pose caches are saved.
   Use --offset 0 0.10 0 to raise all saved sensors by 10 cm.
 EOF
 }
@@ -169,8 +181,12 @@ case "${1:-}" in
         reset_cache
         ;;
     --relearn)
+        if pgrep -x vrserver >/dev/null 2>&1; then
+            echo "Close SteamVR before relearning sensor poses, then run this command again." >&2
+            exit 1
+        fi
         reset_cache
-        launch_and_relearn
+        wait_for_relearn
         ;;
     --set)
         [[ $# -eq 9 ]] || { usage; exit 1; }

@@ -51,6 +51,12 @@ if [[ -e /lib64/libdrm.so.2 && ! -e "${LIB_SHIM_DIR}/libdrm.so" ]]; then
     ln -s /lib64/libdrm.so.2 "${LIB_SHIM_DIR}/libdrm.so"
 fi
 
+if [[ -f "${STEAMVR_SETTINGS}" ]]; then
+    SETTINGS_BACKUP="${STEAMVR_SETTINGS}.open-cv1-backup-$(date +%Y%m%d-%H%M%S)"
+    cp -a "${STEAMVR_SETTINGS}" "${SETTINGS_BACKUP}"
+    echo "Backed up SteamVR settings to ${SETTINGS_BACKUP}"
+fi
+
 python3 - "${STEAMVR_SETTINGS}" <<'PY'
 import json
 import os
@@ -67,12 +73,18 @@ else:
 driver_openhmd = data.setdefault("driver_openhmd", {})
 driver_openhmd["enable"] = True
 driver_openhmd["displayFrequency"] = 90
-driver_openhmd.setdefault("secondsFromVsyncToPhotons", 0.011)
+driver_openhmd["secondsFromVsyncToPhotons"] = 0.011
 driver_openhmd.setdefault("poseOffsetX", 0.0)
 driver_openhmd.setdefault("poseOffsetY", 0.0)
 driver_openhmd.setdefault("poseOffsetZ", 0.0)
 driver_openhmd.setdefault("poseYawDegrees", 0.0)
 driver_openhmd.pop("blocked_by_safe_mode", None)
+
+steamvr = data.setdefault("steamvr", {})
+steamvr["enableHomeApp"] = False
+steamvr["supersampleManualOverride"] = True
+steamvr["supersampleScale"] = 1.0
+steamvr["enableLinuxVulkanAsync"] = False
 
 data.setdefault("driver_oculus", {})["enable"] = False
 data.setdefault("driver_oculus_legacy", {})["enable"] = False

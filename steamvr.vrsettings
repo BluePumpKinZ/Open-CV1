@@ -1,5 +1,11 @@
 {
    "jsonid" : "vrsettings",
+   "steamvr": {
+      "enableHomeApp": false,
+      "enableLinuxVulkanAsync": false,
+      "supersampleManualOverride": true,
+      "supersampleScale": 1.0
+   },
    "driver_lighthouse": {
 		"enable": false
 	},
@@ -10,7 +16,13 @@
 		"enable": false
 	},
    "driver_openhmd" : {
-		 "enable": true
+		 "enable": true,
+      "displayFrequency": 90,
+      "secondsFromVsyncToPhotons": 0.011,
+      "poseOffsetX": 0.0,
+      "poseOffsetY": 0.0,
+      "poseOffsetZ": 0.0,
+      "poseYawDegrees": 0.0
    },
    "version" : "1"
 }

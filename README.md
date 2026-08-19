@@ -43,6 +43,13 @@ Expected on Fedora 44:
 - `libjpeg-turbo-devel`
 - working OpenHMD USB access, preferably through `xr-hardware` udev rules
 
+Install the build dependencies with:
+
+```bash
+sudo dnf install meson ninja-build gcc-c++ pkgconf-pkg-config \
+  hidapi-devel libusb1-devel opencv-devel libjpeg-turbo-devel
+```
+
 ## Install
 
 1. Clone this repository.
@@ -57,7 +64,7 @@ What `install.sh` does:
 - builds the driver into `build/` and generates `driver_openhmd/`
 - registers `driver_openhmd/` with SteamVR through `vrpathreg`
 - creates `~/.ohmd_config.txt` if it does not already exist
-- merges safe `driver_openhmd` settings into `~/.local/share/Steam/config/steamvr.vrsettings`
+- backs up, then merges the Open-CV1 SteamVR performance profile into `~/.local/share/Steam/config/steamvr.vrsettings`
 - disables the native SteamVR Oculus drivers for this setup
 - installs user-local launch helpers in `~/bin/`
 
@@ -83,6 +90,20 @@ The launcher keeps the same user-space behavior as the current working setup:
 - sets `OHMD_VENDOR_OVERRIDE=Oculus`
 - injects the local `libdrm.so` shim when present
 - starts SteamVR through Steam if Steam is not already running
+
+## Beat Saber profile
+
+For the tested Beat Saber setup:
+- force compatibility tool `Proton 9` in Steam's Beat Saber Properties > Compatibility
+- start SteamVR before starting Beat Saber
+- leave SteamVR render resolution at the installed manual `100%` scale
+- keep Linux Vulkan async disabled; it caused substantially worse frame pacing on this CV1 setup
+- SteamVR Home is disabled by the installer to keep the VR session lighter
+
+Proton games obtain the SteamVR OpenXR runtime through SteamVR. There is no
+separate system OpenXR JSON file to install for this setup. If Beat Saber says
+the OpenXR runtime is missing, close the game, start SteamVR first, wait until
+the headset is detected, and then launch Beat Saber from Steam.
 
 ## Device selection
 
@@ -145,6 +166,10 @@ To force a fresh relearn:
 ```bash
 ~/bin/calibrate-open-cv1-sensors.sh --relearn
 ```
+
+First close SteamVR. The helper backs up and clears the old caches, then waits
+while you start SteamVR yourself. Keep the headset and both sensors completely
+still until both new caches are saved. It does not start or stop SteamVR.
 
 To inspect current cached sensor poses:
 

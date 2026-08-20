@@ -6,6 +6,8 @@ CONFIG_DIR="${HOME}/.config/openhmd"
 HEIGHT_REQUEST="${CONFIG_DIR}/rift-height-calibration-request"
 HEIGHT_RESULT="${CONFIG_DIR}/rift-height-calibration-result.txt"
 OFFSET_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set-pose-offset.sh"
+CHAPERONE_CONFIG="${HOME}/.local/share/Steam/config/chaperone_info.vrchap"
+HEAD_TO_EYES_CM=12
 
 cache_files() {
     shopt -s nullglob
@@ -131,6 +133,11 @@ calibrate_height() {
     local max_wait_seconds=20
     local elapsed=0
 
+    if [[ ! -r "${CHAPERONE_CONFIG}" ]]; then
+        echo "Cannot read SteamVR standing-space calibration: ${CHAPERONE_CONFIG}" >&2
+        return 1
+    fi
+
     rm -f "${HEIGHT_REQUEST}" "${HEIGHT_RESULT}"
     echo "Put on the headset, stand upright, and keep your head still. Sampling starts in 5 seconds..."
     sleep 5
@@ -139,21 +146,44 @@ calibrate_height() {
 
     while (( elapsed < max_wait_seconds )); do
         if [[ -s "${HEIGHT_RESULT}" ]]; then
-            local measured_height target_height new_offset
+            local measured_height standing_y target_eye_height new_offset
             read -r measured_height < "${HEIGHT_RESULT}"
             if ! awk -v value="${measured_height}" 'BEGIN { exit !(value ~ /^-?[0-9]+([.][0-9]+)?$/) }'; then
                 echo "The driver returned an invalid height sample: ${measured_height}" >&2
                 return 1
             fi
 
-            target_height="$(awk -v cm="${height_cm}" 'BEGIN { printf "%.6f", cm / 100.0 }')"
-            new_offset="$(awk -v target="${target_height}" -v measured="${measured_height}" \
-                'BEGIN { printf "%.6f", target - measured }')"
+            standing_y="$(python3 - "${CHAPERONE_CONFIG}" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+universes = data.get("universes", [])
+universe = next((item for item in universes if str(item.get("universeID")) == "2"), None)
+if universe is None and len(universes) == 1:
+    universe = universes[0]
+if universe is None:
+    raise SystemExit("Could not find SteamVR standing universe 2")
+
+print(float(universe["standing"]["translation"][1]))
+PY
+            )"
+            target_eye_height="$(awk -v cm="${height_cm}" -v eye="${HEAD_TO_EYES_CM}" \
+                'BEGIN { printf "%.6f", (cm - eye) / 100.0 }')"
+            new_offset="$(awk -v target="${target_eye_height}" -v measured="${measured_height}" \
+                -v standing="${standing_y}" 'BEGIN { printf "%.6f", target - measured - standing }')"
+            if ! awk -v value="${new_offset}" 'BEGIN { exit !(value >= -0.5 && value <= 1.0) }'; then
+                echo "Refusing implausible poseOffsetY ${new_offset} m; the current setting was not changed." >&2
+                return 1
+            fi
             "${OFFSET_SCRIPT}" --y "${new_offset}"
             rm -f "${HEIGHT_RESULT}"
 
-            echo "Raw headset height: ${measured_height} m"
-            echo "Target height: ${target_height} m"
+            echo "Raw driver height: ${measured_height} m"
+            echo "SteamVR standing translation: ${standing_y} m"
+            echo "Target eye height: ${target_eye_height} m (${height_cm} cm body height minus ${HEAD_TO_EYES_CM} cm)"
             echo "Set poseOffsetY to ${new_offset} m. Restart SteamVR for it to take effect."
             return 0
         fi
@@ -238,7 +268,8 @@ Notes:
   --relearn requires SteamVR to be closed first. It backs up and clears existing
   caches, then waits for you to start SteamVR manually. Wear the headset, stand
   upright, and keep your head and sensors still until calibration completes.
-  The driver measures raw headset height and updates poseOffsetY. Restart
+  The driver measures raw headset height, accounts for SteamVR's standing-space
+  transform and a 12 cm head-to-eye distance, then updates poseOffsetY. Restart
   SteamVR afterward to load the new offset.
   Stand upright with SteamVR running before using --height-cm by itself.
   Use --offset 0 0.10 0 to raise all saved sensors by 10 cm.

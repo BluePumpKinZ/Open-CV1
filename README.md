@@ -199,7 +199,8 @@ while you start SteamVR yourself. Enter the height that Beat Saber should
 report, wear the headset, stand upright in the center of the play area, and
 face forward. Keep your head and both sensors still until both sensor poses and
 a stable headset height sample are saved. The helper calculates `poseOffsetY`
-from that raw sample. Restart SteamVR afterward to load the offset; the helper
+from that raw sample, SteamVR's standing-space transform, and a 12 cm
+head-to-eye allowance. Restart SteamVR afterward to load the offset; the helper
 does not start or stop SteamVR.
 
 The height can also be provided non-interactively:

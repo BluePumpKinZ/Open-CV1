@@ -696,6 +696,13 @@ public:
             k_pch_Sample_Section, k_pch_Sample_SynthesizeAngularAcceleration_Bool
         );
 
+        const char* home = getenv("HOME");
+        if (home) {
+            const std::string calibrationDirectory = std::string(home) + "/.config/openhmd";
+            m_heightCalibrationRequestPath = calibrationDirectory + "/rift-height-calibration-request";
+            m_heightCalibrationResultPath = calibrationDirectory + "/rift-height-calibration-result.txt";
+        }
+
         DriverLog( "driver_openhmd: Vendor: %s\n", m_sVendor.c_str() );
         DriverLog( "driver_openhmd: Serial Number: %s\n", m_sSerialNumber.c_str() );
         DriverLog( "driver_openhmd: Model Number: %s\n", m_sModelNumber.c_str() );
@@ -1115,6 +1122,8 @@ public:
         pose.vecPosition[1] = pos[1];
         pose.vecPosition[2] = pos[2];
 
+        CaptureHeightCalibration(pos[1]);
+
 #ifdef OHMD_HAVE_VEL_ACCEL_API_v0
 	float vel[3], accel[3];
 	if (GetPoseFloat(d, OHMD_VELOCITY_VECTOR, vel) == 0) {
@@ -1172,6 +1181,92 @@ private:
     int GetPoseFloat(ohmd_device* device, ohmd_float_value type, float* out)
     {
         return m_isOculus ? ohmd_device_getf_direct(device, type, out) : ohmd_device_getf(device, type, out);
+    }
+
+    void CaptureHeightCalibration(float rawHeight)
+    {
+        if (!m_isOculus || m_heightCalibrationRequestPath.empty())
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (!m_heightCalibrationActive) {
+            if (now < m_nextHeightCalibrationPoll)
+                return;
+            m_nextHeightCalibrationPoll = now + std::chrono::milliseconds(100);
+
+            FILE* request = fopen(m_heightCalibrationRequestPath.c_str(), "r");
+            if (!request)
+                return;
+            fclose(request);
+
+            m_heightCalibrationActive = true;
+            ResetHeightCalibrationSamples(now);
+            DriverLog("driver_openhmd: Started raw HMD height calibration sample\n");
+        }
+
+        if (!isfinite(rawHeight))
+            return;
+
+        if (m_heightCalibrationSampleCount == 0) {
+            m_heightCalibrationMin = rawHeight;
+            m_heightCalibrationMax = rawHeight;
+        } else {
+            if (rawHeight < m_heightCalibrationMin)
+                m_heightCalibrationMin = rawHeight;
+            if (rawHeight > m_heightCalibrationMax)
+                m_heightCalibrationMax = rawHeight;
+        }
+        m_heightCalibrationSum += rawHeight;
+        ++m_heightCalibrationSampleCount;
+
+        const double sampleSeconds = std::chrono::duration<double>(now - m_heightCalibrationStart).count();
+        if (sampleSeconds < 2.0 || m_heightCalibrationSampleCount < 100)
+            return;
+
+        const float heightRange = m_heightCalibrationMax - m_heightCalibrationMin;
+        if (heightRange > 0.03f) {
+            DriverLog(
+                "driver_openhmd: HMD moved %.1f mm during height calibration; sampling again\n",
+                heightRange * 1000.0f
+            );
+            ResetHeightCalibrationSamples(now);
+            return;
+        }
+
+        const double averageHeight = m_heightCalibrationSum / m_heightCalibrationSampleCount;
+        const std::string temporaryResultPath = m_heightCalibrationResultPath + ".tmp";
+        FILE* result = fopen(temporaryResultPath.c_str(), "w");
+        if (!result) {
+            DriverLog("driver_openhmd: Could not write HMD height calibration result\n");
+            ResetHeightCalibrationSamples(now);
+            return;
+        }
+        fprintf(result, "%.6f\n", averageHeight);
+        fclose(result);
+
+        if (rename(temporaryResultPath.c_str(), m_heightCalibrationResultPath.c_str()) != 0) {
+            DriverLog("driver_openhmd: Could not publish HMD height calibration result\n");
+            remove(temporaryResultPath.c_str());
+            ResetHeightCalibrationSamples(now);
+            return;
+        }
+
+        remove(m_heightCalibrationRequestPath.c_str());
+        m_heightCalibrationActive = false;
+        DriverLog(
+            "driver_openhmd: Saved raw HMD height calibration sample %.3f m (range %.1f mm)\n",
+            averageHeight,
+            heightRange * 1000.0f
+        );
+    }
+
+    void ResetHeightCalibrationSamples(const std::chrono::steady_clock::time_point& now)
+    {
+        m_heightCalibrationStart = now;
+        m_heightCalibrationSampleCount = 0;
+        m_heightCalibrationSum = 0.0;
+        m_heightCalibrationMin = 0.0f;
+        m_heightCalibrationMax = 0.0f;
     }
 
     void RecordPoseTiming(const float quaternion[4], const float position[3])
@@ -1321,6 +1416,15 @@ private:
     std::chrono::steady_clock::time_point m_previousPosePublishTime;
     std::chrono::steady_clock::time_point m_previousRotationChangeTime;
     std::chrono::steady_clock::time_point m_previousPositionChangeTime;
+    bool m_heightCalibrationActive = false;
+    uint32_t m_heightCalibrationSampleCount = 0;
+    double m_heightCalibrationSum = 0.0;
+    float m_heightCalibrationMin = 0.0f;
+    float m_heightCalibrationMax = 0.0f;
+    std::string m_heightCalibrationRequestPath;
+    std::string m_heightCalibrationResultPath;
+    std::chrono::steady_clock::time_point m_nextHeightCalibrationPoll;
+    std::chrono::steady_clock::time_point m_heightCalibrationStart;
     float m_flSecondsFromVsyncToPhotons;
     float m_flDisplayFrequency;
     float m_flIPD;

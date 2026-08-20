@@ -195,8 +195,27 @@ To force a fresh relearn:
 ```
 
 First close SteamVR. The helper backs up and clears the old caches, then waits
-while you start SteamVR yourself. Keep the headset and both sensors completely
-still until both new caches are saved. It does not start or stop SteamVR.
+while you start SteamVR yourself. Enter the height that Beat Saber should
+report, wear the headset, stand upright in the center of the play area, and
+face forward. Keep your head and both sensors still until both sensor poses and
+a stable headset height sample are saved. The helper calculates `poseOffsetY`
+from that raw sample. Restart SteamVR afterward to load the offset; the helper
+does not start or stop SteamVR.
+
+The height can also be provided non-interactively:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --relearn --height-cm 172
+```
+
+To correct height without discarding good sensor poses, start SteamVR, wear the
+headset, stand upright and still, then run:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --height-cm 172
+```
+
+Restart SteamVR once the sample completes.
 
 To inspect current cached sensor poses:
 

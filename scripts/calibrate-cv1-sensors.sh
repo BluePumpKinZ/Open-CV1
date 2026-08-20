@@ -132,6 +132,8 @@ calibrate_height() {
     local elapsed=0
 
     rm -f "${HEIGHT_REQUEST}" "${HEIGHT_RESULT}"
+    echo "Put on the headset, stand upright, and keep your head still. Sampling starts in 5 seconds..."
+    sleep 5
     printf 'capture\n' > "${HEIGHT_REQUEST}"
     echo "Sampling headset height for two seconds. Stand upright and keep your head still..."
 

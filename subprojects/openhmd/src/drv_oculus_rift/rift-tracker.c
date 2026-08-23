@@ -61,6 +61,17 @@
 #define MIN_ROT_ERROR DEG_TO_RAD(25)
 #define MIN_POS_ERROR 0.1
 
+/* Controller gyros continue to provide a useful orientation prior while the
+ * LEDs are occluded.  Never accept an optical solution that is farther from
+ * that prior than this, even if the Kalman covariance has grown enough to
+ * classify it as a match. */
+#define CONTROLLER_MAX_OPTICAL_ORIENT_ERROR DEG_TO_RAD(60)
+#define CONTROLLER_MAX_OPTICAL_ORIENT_UPDATE DEG_TO_RAD(35)
+#define CONTROLLER_MOTION_RESET_DISTANCE 0.10f
+#define POSE_CONSENSUS_MAX_ORIENT_ERROR DEG_TO_RAD(20)
+#define POSE_CONSENSUS_MAX_POS_ERROR 0.15f
+#define POSE_CONSENSUS_MIN_LED_IDS 4
+
 /* Reject HMD accelerometer corrections during short impacts. Gyro integration
  * and optical pose updates continue normally throughout the holdoff. */
 #define IMPACT_REJECT_ACCEL_LOW_G 0.80f
@@ -104,6 +115,34 @@ struct rift_tracker_pose_delay_slot {
 	/* Number of reports we used from the supplied ones */
 	int n_used_reports;
 };
+
+static bool
+pose_has_two_sensor_consensus(const rift_tracker_pose_delay_slot *slot,
+	const posef *pose, const rift_pose_metrics *score)
+{
+	if (score->matched_led_ids < POSE_CONSENSUS_MIN_LED_IDS)
+		return false;
+
+	for (int i = 0; i < slot->n_pose_reports; i++) {
+		const rift_tracker_pose_report *other = slot->pose_reports + i;
+		quatf orient_diff;
+		vec3f rot_error, pos_error;
+
+		if (other->score.matched_led_ids < POSE_CONSENSUS_MIN_LED_IDS)
+			continue;
+
+		oquatf_diff(&pose->orient, &other->pose.orient, &orient_diff);
+		oquatf_normalize_me(&orient_diff);
+		oquatf_to_rotation(&orient_diff, &rot_error);
+		ovec3f_subtract(&pose->pos, &other->pose.pos, &pos_error);
+
+		if (ovec3f_get_length(&rot_error) <= POSE_CONSENSUS_MAX_ORIENT_ERROR &&
+				ovec3f_get_length(&pos_error) <= POSE_CONSENSUS_MAX_POS_ERROR)
+			return true;
+	}
+
+	return false;
+}
 
 /* Internal full tracked device struct */
 struct rift_tracked_device_priv {
@@ -209,7 +248,7 @@ rift_tracker_add_device (rift_tracker_ctx *ctx, int device_id, posef *imu_pose, 
 
 	next_dev->base.id = device_id;
 	next_dev->n_delay_slots = ctx->n_sensors != 0 ? NUM_POSE_DELAY_SLOTS : 0;
-	rift_kalman_6dof_init(&next_dev->ukf_fusion, &init_pose, next_dev->n_delay_slots);
+	rift_kalman_6dof_init(&next_dev->ukf_fusion, &init_pose, next_dev->n_delay_slots, device_id != 0);
 	next_dev->last_acquired_pose_lock_ts = next_dev->last_reported_pose = next_dev->last_observed_orient_ts = next_dev->last_observed_pose_ts = next_dev->device_time_ns = 0;
 	next_dev->impact_rejection_active = false;
 
@@ -593,6 +632,7 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 	posef pose_before_update;
 	bool is_hmd = dev->base.id == 0;
 	bool use_accel = true;
+	bool accel_updates_orientation = true;
 	float accel_g = 0.0f;
 	float gyro_dps = 0.0f;
 	float gravity_error_deg = 0.0f;
@@ -608,7 +648,7 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 	}
 	dev->last_device_ts = device_ts;
 
-	if (is_hmd) {
+	{
 		rift_kalman_6dof_get_pose_at(&dev->ukf_fusion, dev->device_time_ns, &pose_before_update, NULL, NULL, NULL, NULL, NULL);
 
 		const float gravity = 9.80665f;
@@ -636,23 +676,27 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 				dev->impact_rejection_active = true;
 				dev->impact_rejection_start_ts = dev->device_time_ns;
 				dev->impact_rejection_samples = 0;
-				LOGI("HMD impact rejection started: accel %.3fg, gravity disagreement %.2f deg, gyro %.1f deg/s",
-					accel_g, gravity_error_deg, gyro_dps);
+				LOGI("Device %d dynamic acceleration isolation started: accel %.3fg, gravity disagreement %.2f deg, gyro %.1f deg/s",
+					dev->base.id, accel_g, gravity_error_deg, gyro_dps);
 			}
 		}
 
 		if (dev->impact_rejection_active && dev->device_time_ns <= dev->impact_rejection_until_ts) {
-			use_accel = false;
+			if (is_hmd)
+				use_accel = false;
+			else
+				accel_updates_orientation = false;
 			dev->impact_rejection_samples++;
 		} else if (dev->impact_rejection_active) {
 			double duration_ms = (dev->device_time_ns - dev->impact_rejection_start_ts) / 1000000.0;
-			LOGI("HMD impact rejection ended: held %.1f ms, rejected %u accelerometer samples",
-				duration_ms, dev->impact_rejection_samples);
+			LOGI("Device %d dynamic acceleration isolation ended: held %.1f ms, isolated %u accelerometer samples",
+				dev->base.id, duration_ms, dev->impact_rejection_samples);
 			dev->impact_rejection_active = false;
 		}
 	}
 
-	rift_kalman_6dof_imu_update (&dev->ukf_fusion, dev->device_time_ns, ang_vel, accel, mag_field, use_accel);
+	rift_kalman_6dof_imu_update (&dev->ukf_fusion, dev->device_time_ns, ang_vel, accel, mag_field,
+		use_accel, accel_updates_orientation);
 
 	obs = dev->pending_imu_observations + dev->num_pending_imu_observations;
 	obs->local_ts = local_ts;
@@ -789,6 +833,7 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 	int frame_fusion_slot = -1;
 	bool update_position = false;
 	bool update_orientation = false;
+	bool force_motion_reset = false;
 	posef imu_pose;
 
 	ohmd_lock_mutex (dev->device_lock);
@@ -812,12 +857,14 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 	if (slot != NULL) {
 		quatf orient_diff;
 		vec3f pos_error, rot_error;
+		float orient_error_rad;
 
 		ovec3f_subtract(&model_pose->pos, &dev_info->capture_pose.pos, &pos_error);
 
 		oquatf_diff(&model_pose->orient, &dev_info->capture_pose.orient, &orient_diff);
 		oquatf_normalize_me(&orient_diff);
 		oquatf_to_rotation(&orient_diff, &rot_error);
+		orient_error_rad = ovec3f_get_length(&rot_error);
 
 		LOGD ("Got pose update for delay slot %d for dev %d, ts %llu (delay %f) orient %f %f %f %f diff %f %f %f pos %f %f %f diff %f %f %f from %s\n",
 			slot->slot_id, dev->base.id,
@@ -840,8 +887,55 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 			update_position = true;
 		}
 
+		/* Normal HMD observations can come from either camera. If a pose no
+		 * longer agrees with the established IMU/optical state, however, only
+		 * let two cameras that see matching identified LEDs replace both its
+		 * global position and orientation. */
+		bool hmd_needs_consensus = dev->base.id == 0 && dev->last_observed_orient_ts != 0 &&
+			(!POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_POSITION) ||
+			 !POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_ORIENT));
+		if (hmd_needs_consensus) {
+			if (pose_has_two_sensor_consensus(slot, &imu_pose, score)) {
+				LOGI("Reacquiring HMD full pose from two-sensor LED consensus");
+				update_position = true;
+				update_orientation = true;
+				force_motion_reset = true;
+				dev->last_observed_orient_ts = dev->device_time_ns;
+			} else {
+				update_position = false;
+			}
+		}
+		/* A growing covariance must not turn a flipped controller solution into
+		 * an orientation match.  Position from that same PnP solution is invalid
+		 * too, so reject the complete optical observation. */
+		else if (dev->base.id != 0 && dev->last_observed_orient_ts != 0 &&
+				orient_error_rad > CONTROLLER_MAX_OPTICAL_ORIENT_ERROR) {
+			/* A large disagreement can mean either an ambiguous PnP solution or
+			 * genuine IMU desynchronisation.  Require two camera reports for the
+			 * same exposure to agree, with several decoded LED identities, before
+			 * replacing the controller's complete global pose. */
+			if (pose_has_two_sensor_consensus(slot, &imu_pose, score)) {
+				LOGI("Reacquiring controller %d full pose from two-sensor LED consensus (IMU error %.1f degrees)",
+					dev->base.id, RAD_TO_DEG(orient_error_rad));
+				update_position = true;
+				update_orientation = true;
+				force_motion_reset = true;
+				dev->last_observed_orient_ts = dev->device_time_ns;
+			} else {
+				LOGD("Rejecting controller %d pose: optical orientation differs from IMU by %.1f degrees",
+					dev->base.id, RAD_TO_DEG(orient_error_rad));
+				update_position = false;
+			}
+		}
+		/* Between the correction and rejection limits, retain gyro orientation
+		 * but still use the optical position. */
+		else if (dev->base.id != 0 && dev->last_observed_orient_ts != 0 &&
+				orient_error_rad > CONTROLLER_MAX_OPTICAL_ORIENT_UPDATE) {
+			LOGD("Applying controller %d position only: optical orientation differs by %.1f degrees",
+				dev->base.id, RAD_TO_DEG(orient_error_rad));
+		}
 		/* If we have a strong match, update both position and orientation */
-		if (POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_ORIENT)) {
+		else if (POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_ORIENT)) {
 			update_orientation = true;
 			if ((dev->device_time_ns - dev->last_observed_orient_ts) > (POSE_LOST_ORIENT_THRESHOLD * 1000000UL)) {
 				LOGI("Matched orientation after %f sec", (dev->device_time_ns - dev->last_observed_pose_ts) / 1000000000.0);
@@ -851,8 +945,22 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 				dev->last_observed_orient_ts = dev->device_time_ns;
 		}
 		else if ((dev->device_time_ns - dev->last_observed_orient_ts) > (POSE_LOST_ORIENT_THRESHOLD * 1000000UL)) {
-			LOGI("Forcing orientation observation");
-			update_orientation = true;
+			/* Controller orientation remains observable from its gyro while it is
+			 * outside camera coverage.  A controller's LED constellation can also
+			 * produce a plausible pose rotated by 180 degrees during reacquisition.
+			 * Do not let such a camera solution replace the IMU orientation (or use
+			 * the position solved from that wrong orientation).  The HMD retains the
+			 * forced update so that its unobservable yaw can still be recovered. */
+			if (dev->base.id == 0) {
+				LOGI("Forcing HMD orientation observation");
+				update_orientation = true;
+			} else {
+				/* The optical position is still useful when the disagreement is
+				 * below the hard flip threshold above.  Correct position while
+				 * retaining the controller's gyro-derived orientation. */
+				LOGD("Applying controller %d position-only pose (orientation error %f %f %f)",
+					dev->base.id, rot_error.x, rot_error.y, rot_error.z);
+			}
 			/* Don't update the orientation match time here - only do that on an actual match */
 		}
 		else {
@@ -861,14 +969,22 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 		}
 
 		if (update_position) {
+			bool reset_linear_motion = force_motion_reset || (dev->base.id != 0 &&
+				ovec3f_get_length(&pos_error) > CONTROLLER_MOTION_RESET_DISTANCE);
+
 			if (dev->last_acquired_pose_lock_ts == 0)
-				dev->last_acquired_pose_lock_ts = dev->last_acquired_pose_lock_ts;
+				dev->last_acquired_pose_lock_ts = dev->device_time_ns;
 
 			if (update_position) {
 				if (update_orientation) {
 					rift_kalman_6dof_pose_update(&dev->ukf_fusion, dev->device_time_ns, &imu_pose, slot->slot_id);
 				} else {
 					rift_kalman_6dof_position_update(&dev->ukf_fusion, dev->device_time_ns, &imu_pose.pos, slot->slot_id);
+				}
+				if (reset_linear_motion) {
+					LOGI("Resetting device %d linear motion after %.3fm optical correction",
+						dev->base.id, ovec3f_get_length(&pos_error));
+					rift_kalman_6dof_clear_linear_motion(&dev->ukf_fusion);
 				}
       }
 			dev->last_observed_pose_ts = dev->device_time_ns;

@@ -162,9 +162,6 @@ void process_payload(struct rift_sensor_uvc_stream *stream, unsigned char *paylo
 		 * when we see the frame change: */
 		if (stream->frame_collected != 0 && pts != stream->cur_pts &&
 				stream->format != OHMD_VIDEO_FRAME_FORMAT_JPEG) {
-			printf("UVC PTS changed in-frame at %u bytes. Lost %u ms\n",
-			    stream->frame_collected,
-			    (pts - stream->cur_pts) * 1000 / RIFT_SENSOR_CLOCK_FREQ);
 			stream->cur_pts = pts;
 		}
 	}
@@ -178,15 +175,23 @@ void process_payload(struct rift_sensor_uvc_stream *stream, unsigned char *paylo
 		struct timespec ts;
 		uint64_t time;
 
-		if (stream->frame_collected > 0) {
-			printf("UVC Dropping short frame: %u < %u (%d lost)\n",
-						stream->frame_collected, stream->frame_size,
-						stream->frame_size - stream->frame_collected);
-		}
-
 		/* Start of new frame */
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		time = ts.tv_sec * 1000000000 + ts.tv_nsec;
+
+		if (stream->frame_collected > 0) {
+			stream->short_frame_count++;
+			if (stream->short_frame_log_start == 0)
+				stream->short_frame_log_start = time;
+			else if (time - stream->short_frame_log_start >= 1000000000ULL) {
+				LOGW("UVC dropped %u short frames in %.2f sec (latest %u/%u bytes)",
+					stream->short_frame_count,
+					(double)(time - stream->short_frame_log_start) / 1000000000.0,
+					stream->frame_collected, stream->frame_size);
+				stream->short_frame_count = 0;
+				stream->short_frame_log_start = time;
+			}
+		}
 
 		/* Get a frame to capture into */
 		if (stream->cur_frame == NULL) {

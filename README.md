@@ -155,6 +155,11 @@ This repository adds global pose offsets to the SteamVR driver config:
 - `poseOffsetZ`
 - `poseYawDegrees`
 
+Controller render/tracking-origin alignment can be adjusted in controller-local
+coordinates with `controllerLocalOffsetX`, `controllerLocalOffsetY`, and
+`controllerLocalOffsetZ`. `controllerLocalOffsetOutward` moves the controllers
+apart symmetrically. These offsets rotate with each controller.
+
 The easiest way to change them is:
 
 ```bash

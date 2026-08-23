@@ -5,7 +5,8 @@ set -euo pipefail
 CONFIG_DIR="${HOME}/.config/openhmd"
 HEIGHT_REQUEST="${CONFIG_DIR}/rift-height-calibration-request"
 HEIGHT_RESULT="${CONFIG_DIR}/rift-height-calibration-result.txt"
-OFFSET_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/set-pose-offset.sh"
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+OFFSET_SCRIPT="$(dirname "${SCRIPT_PATH}")/set-pose-offset.sh"
 CHAPERONE_CONFIG="${HOME}/.local/share/Steam/config/chaperone_info.vrchap"
 HEAD_TO_EYES_CM=12
 

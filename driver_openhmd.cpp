@@ -76,6 +76,10 @@ static const char * const k_pch_Sample_PoseOffsetX_Float = "poseOffsetX";
 static const char * const k_pch_Sample_PoseOffsetY_Float = "poseOffsetY";
 static const char * const k_pch_Sample_PoseOffsetZ_Float = "poseOffsetZ";
 static const char * const k_pch_Sample_PoseYawDegrees_Float = "poseYawDegrees";
+static const char * const k_pch_Sample_ControllerLocalOffsetX_Float = "controllerLocalOffsetX";
+static const char * const k_pch_Sample_ControllerLocalOffsetY_Float = "controllerLocalOffsetY";
+static const char * const k_pch_Sample_ControllerLocalOffsetZ_Float = "controllerLocalOffsetZ";
+static const char * const k_pch_Sample_ControllerLocalOffsetOutward_Float = "controllerLocalOffsetOutward";
 static const char * const k_pch_Sample_SynthesizeAngularAcceleration_Bool = "synthesizeAngularAcceleration";
 static const char * const k_pch_Sample_LogPoseTiming_Bool = "logPoseTiming";
 static const char * const k_pch_Sample_EnableHaptics_Bool = "enableHaptics";
@@ -91,6 +95,8 @@ struct PoseOffsets
 };
 
 static PoseOffsets g_poseOffsets{0.0f, 0.0f, 0.0f, 0.0f};
+static float g_controllerLocalOffset[3]{0.0f, 0.0f, 0.0f};
+static float g_controllerLocalOffsetOutward = 0.0f;
 static bool g_logPoseTiming = false;
 static bool g_useDirectPoseReads = false;
 static bool g_enableHaptics = true;
@@ -109,6 +115,25 @@ static HmdQuaternion_t MultiplyQuaternion(const HmdQuaternion_t& a, const HmdQua
         a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
         a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
     };
+}
+
+static void ApplyControllerLocalOffset(DriverPose_t& pose, float outwardDirection)
+{
+    const double x = g_controllerLocalOffset[0] + outwardDirection * g_controllerLocalOffsetOutward;
+    const double y = g_controllerLocalOffset[1];
+    const double z = g_controllerLocalOffset[2];
+    const HmdQuaternion_t& q = pose.qRotation;
+
+    // Rotate the controller-local translation into driver space.
+    pose.vecPosition[0] += (1.0 - 2.0 * (q.y * q.y + q.z * q.z)) * x
+        + 2.0 * (q.x * q.y - q.w * q.z) * y
+        + 2.0 * (q.x * q.z + q.w * q.y) * z;
+    pose.vecPosition[1] += 2.0 * (q.x * q.y + q.w * q.z) * x
+        + (1.0 - 2.0 * (q.x * q.x + q.z * q.z)) * y
+        + 2.0 * (q.y * q.z - q.w * q.x) * z;
+    pose.vecPosition[2] += 2.0 * (q.x * q.z - q.w * q.y) * x
+        + 2.0 * (q.y * q.z + q.w * q.x) * y
+        + (1.0 - 2.0 * (q.x * q.x + q.y * q.y)) * z;
 }
 
 static void ApplyPoseOffsets(DriverPose_t& pose)
@@ -136,6 +161,10 @@ static void LoadPoseOffsets()
     g_poseOffsets.y = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_PoseOffsetY_Float);
     g_poseOffsets.z = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_PoseOffsetZ_Float);
     g_poseOffsets.yawDegrees = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_PoseYawDegrees_Float);
+    g_controllerLocalOffset[0] = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_ControllerLocalOffsetX_Float);
+    g_controllerLocalOffset[1] = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_ControllerLocalOffsetY_Float);
+    g_controllerLocalOffset[2] = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_ControllerLocalOffsetZ_Float);
+    g_controllerLocalOffsetOutward = vr::VRSettings()->GetFloat(k_pch_Sample_Section, k_pch_Sample_ControllerLocalOffsetOutward_Float);
 
     DriverLog(
         "driver_openhmd: Pose offset x=%f y=%f z=%f yaw=%f\n",
@@ -143,6 +172,13 @@ static void LoadPoseOffsets()
         g_poseOffsets.y,
         g_poseOffsets.z,
         g_poseOffsets.yawDegrees
+    );
+    DriverLog(
+        "driver_openhmd: Controller-local offset x=%f y=%f z=%f outward=%f\n",
+        g_controllerLocalOffset[0],
+        g_controllerLocalOffset[1],
+        g_controllerLocalOffset[2],
+        g_controllerLocalOffsetOutward
     );
 }
 //-----------------------------------------------------------------------------
@@ -499,6 +535,9 @@ public:
 		}
 #endif
 	}
+
+	const float outwardDirection = (device_flags & OHMD_DEVICE_FLAGS_LEFT_CONTROLLER) ? -1.0f : 1.0f;
+	ApplyControllerLocalOffset(pose, outwardDirection);
 
 	// DriverLog("get controller %d pose %f %f %f %f, %f %f %f\n", index, quat[0], quat[1], quat[2], quat[3], pos[0], pos[1], pos[2]);
 

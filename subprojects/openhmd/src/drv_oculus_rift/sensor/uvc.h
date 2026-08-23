@@ -33,6 +33,10 @@ struct rift_sensor_uvc_stream {
 	uint32_t cur_pts;
 	/* Number of bytes collected from the current frame */
 	int frame_collected;
+	/* Aggregate short-frame diagnostics instead of logging on the USB path
+	 * for every dropped frame. */
+	uint64_t short_frame_log_start;
+	unsigned int short_frame_count;
 	/* true if we're skipping the current frame */
 	bool skip_frame;
 

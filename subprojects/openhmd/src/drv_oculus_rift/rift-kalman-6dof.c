@@ -638,7 +638,7 @@ static void rift_kalman_6dof_reinit(rift_kalman_6dof_filter *state)
 		MATRIX2D_XY(state->ukf.P_prior, i, i) = IMU_GYRO_BIAS_NOISE_INITIAL;
 }
 
-void rift_kalman_6dof_init(rift_kalman_6dof_filter *state, posef *init_pose, int num_delay_slots)
+void rift_kalman_6dof_init(rift_kalman_6dof_filter *state, posef *init_pose, int num_delay_slots, bool is_controller)
 {
 	int i, d;
 
@@ -721,9 +721,16 @@ void rift_kalman_6dof_init(rift_kalman_6dof_filter *state, posef *init_pose, int
 	for (int i = 0; i < 3; i++)
 		MATRIX2D_XY(state->m2.R, i, i) = 0.01 * 0.01; /* 1cm error std dev */
 
-	MATRIX2D_XY(state->m2.R, 3, 3) = (DEG_TO_RAD(90) * DEG_TO_RAD(90)); /* 90 degrees std dev (don't trust observations much for X/Z, 20 degrees for yaw) */
-	MATRIX2D_XY(state->m2.R, 4, 4) = (DEG_TO_RAD(20) * DEG_TO_RAD(20)); /* Y */
-	MATRIX2D_XY(state->m2.R, 5, 5) = (DEG_TO_RAD(90) * DEG_TO_RAD(90)); /* Z */
+	if (is_controller) {
+		/* A validated Touch LED pose is a useful correction on every axis.
+		 * The caller rejects the ambiguous flipped solutions before fusion. */
+		for (int i = 3; i < 6; i++)
+			MATRIX2D_XY(state->m2.R, i, i) = (DEG_TO_RAD(10) * DEG_TO_RAD(10));
+	} else {
+		MATRIX2D_XY(state->m2.R, 3, 3) = (DEG_TO_RAD(90) * DEG_TO_RAD(90)); /* 90 degrees std dev (don't trust observations much for X/Z, 20 degrees for yaw) */
+		MATRIX2D_XY(state->m2.R, 4, 4) = (DEG_TO_RAD(20) * DEG_TO_RAD(20)); /* Y */
+		MATRIX2D_XY(state->m2.R, 5, 5) = (DEG_TO_RAD(90) * DEG_TO_RAD(90)); /* Z */
+	}
 
 	/* m_position is for position-only measurements - no orientation. */
 	ukf_measurement_init(&state->m_position, 3, 3, &state->ukf, position_measurement_func, NULL, NULL, NULL);
@@ -799,7 +806,7 @@ void rift_kalman_6dof_release_delay_slot(rift_kalman_6dof_filter *state, int del
 	state->slot_inuse[delay_slot] = false;
 }
 
-void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field, bool use_accel)
+void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field, bool use_accel, bool accel_updates_orientation)
 {
 	ukf_measurement *m = NULL;
 
@@ -808,7 +815,7 @@ void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time,
 	state->ang_vel.y = ang_vel->y;
 	state->ang_vel.z = ang_vel->z;
 
-	if (use_accel) {
+	if (use_accel && accel_updates_orientation) {
 		/* Put acceleration in the measurement vector to correct the orientation by gravity. */
 		/* FIXME: Use mag if set? */
 		m = &state->m1;
@@ -818,6 +825,30 @@ void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time,
 	}
 
 	rift_kalman_6dof_update(state, time, m);
+
+	if (use_accel && !accel_updates_orientation) {
+		/* During strong linear acceleration, treating the accelerometer as a
+		 * gravity direction corrupts orientation.  Preserve gyro orientation,
+		 * but still transform the measured specific force into world-space
+		 * linear acceleration for positional prediction. */
+		quatd orient = {{ MATRIX2D_Y(state->ukf.x_prior, STATE_ORIENTATION),
+		                  MATRIX2D_Y(state->ukf.x_prior, STATE_ORIENTATION+1),
+		                  MATRIX2D_Y(state->ukf.x_prior, STATE_ORIENTATION+2),
+		                  MATRIX2D_Y(state->ukf.x_prior, STATE_ORIENTATION+3) }};
+		vec3d local_accel = {{
+			accel->x - MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL_BIAS),
+			accel->y - MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL_BIAS+1),
+			accel->z - MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL_BIAS+2),
+		}};
+		vec3d global_accel;
+
+		oquatd_get_rotated(&orient, &local_accel, &global_accel);
+		global_accel.y -= GRAVITY_MAG;
+
+		MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL) = OHMD_CLAMP(global_accel.x, -MAX_ACCEL, MAX_ACCEL);
+		MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL+1) = OHMD_CLAMP(global_accel.y, -MAX_ACCEL, MAX_ACCEL);
+		MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL+2) = OHMD_CLAMP(global_accel.z, -MAX_ACCEL, MAX_ACCEL);
+	}
 }
 
 void rift_kalman_6dof_pose_update(rift_kalman_6dof_filter *state, uint64_t time, posef *pose, int delay_slot)
@@ -869,6 +900,17 @@ void rift_kalman_6dof_position_update(rift_kalman_6dof_filter *state, uint64_t t
 	MATRIX2D_Y(m->z, POSE_MEAS_POSITION+2) = pos->z;
 
 	rift_kalman_6dof_update(state, time, m);
+}
+
+void rift_kalman_6dof_clear_linear_motion(rift_kalman_6dof_filter *state)
+{
+	/* A large absolute optical correction means the inertial translation
+	 * estimate has diverged.  Retaining its velocity and acceleration would
+	 * immediately drive the corrected position away again. */
+	for (int i = 0; i < 3; i++) {
+		MATRIX2D_Y(state->ukf.x_prior, STATE_VELOCITY + i) = 0.0;
+		MATRIX2D_Y(state->ukf.x_prior, STATE_ACCEL + i) = 0.0;
+	}
 }
 
 /* Get the pose info from a delay slot, or the main state

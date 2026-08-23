@@ -7,6 +7,10 @@
       "poseOffsetY" : 0.0,
       "poseOffsetZ" : 0.0,
       "poseYawDegrees" : 0.0,
+      "controllerLocalOffsetX" : 0.0,
+      "controllerLocalOffsetY" : 0.03,
+      "controllerLocalOffsetZ" : 0.0,
+      "controllerLocalOffsetOutward" : 0.02,
       "logPoseTiming" : false,
       "enableHaptics" : true,
       "synthesizeAngularAcceleration" : true

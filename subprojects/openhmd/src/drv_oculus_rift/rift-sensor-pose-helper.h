@@ -38,6 +38,7 @@ typedef struct {
 	rift_pose_match_flags match_flags;
 
 	int matched_blobs;
+	int matched_led_ids;
 	int unmatched_blobs;
 	int visible_leds;
 

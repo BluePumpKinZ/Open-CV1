@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 
 #include <libusb.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -59,6 +60,14 @@
 
 #define MIN_ROT_ERROR DEG_TO_RAD(25)
 #define MIN_POS_ERROR 0.1
+
+/* Reject HMD accelerometer corrections during short impacts. Gyro integration
+ * and optical pose updates continue normally throughout the holdoff. */
+#define IMPACT_REJECT_ACCEL_LOW_G 0.80f
+#define IMPACT_REJECT_ACCEL_HIGH_G 1.20f
+#define IMPACT_REJECT_GRAVITY_ERROR_DEG 12.0f
+#define IMPACT_REJECT_GYRO_DPS 15.0f
+#define IMPACT_REJECT_HOLDOFF_NS 250000000ULL
 
 typedef struct rift_tracked_device_priv rift_tracked_device_priv;
 typedef struct rift_tracker_pose_report rift_tracker_pose_report;
@@ -137,6 +146,11 @@ struct rift_tracked_device_priv {
 	vec3f reported_lin_vel;
 	vec3f reported_lin_accel;
 
+	bool impact_rejection_active;
+	uint64_t impact_rejection_start_ts;
+	uint64_t impact_rejection_until_ts;
+	unsigned int impact_rejection_samples;
+
 	posef model_pose;
 
 	exp_filter_pose pose_output_filter;
@@ -197,6 +211,7 @@ rift_tracker_add_device (rift_tracker_ctx *ctx, int device_id, posef *imu_pose, 
 	next_dev->n_delay_slots = ctx->n_sensors != 0 ? NUM_POSE_DELAY_SLOTS : 0;
 	rift_kalman_6dof_init(&next_dev->ukf_fusion, &init_pose, next_dev->n_delay_slots);
 	next_dev->last_acquired_pose_lock_ts = next_dev->last_reported_pose = next_dev->last_observed_orient_ts = next_dev->last_observed_pose_ts = next_dev->device_time_ns = 0;
+	next_dev->impact_rejection_active = false;
 
 	exp_filter_pose_init(&next_dev->pose_output_filter);
 
@@ -575,6 +590,12 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 {
 	rift_tracked_device_priv *dev = (rift_tracked_device_priv *) (dev_base);
 	rift_tracked_device_imu_observation *obs;
+	posef pose_before_update;
+	bool is_hmd = dev->base.id == 0;
+	bool use_accel = true;
+	float accel_g = 0.0f;
+	float gyro_dps = 0.0f;
+	float gravity_error_deg = 0.0f;
 
 	ohmd_lock_mutex (dev->device_lock);
 
@@ -587,7 +608,51 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 	}
 	dev->last_device_ts = device_ts;
 
-	rift_kalman_6dof_imu_update (&dev->ukf_fusion, dev->device_time_ns, ang_vel, accel, mag_field);
+	if (is_hmd) {
+		rift_kalman_6dof_get_pose_at(&dev->ukf_fusion, dev->device_time_ns, &pose_before_update, NULL, NULL, NULL, NULL, NULL);
+
+		const float gravity = 9.80665f;
+		float accel_length = ovec3f_get_length(accel);
+		accel_g = accel_length / gravity;
+		gyro_dps = RAD_TO_DEG(ovec3f_get_length(ang_vel));
+		vec3f world_up = {{ 0.0f, 1.0f, 0.0f }};
+		vec3f predicted_local_up;
+		quatf local_from_world = pose_before_update.orient;
+		oquatf_inverse(&local_from_world);
+		oquatf_get_rotated(&local_from_world, &world_up, &predicted_local_up);
+
+		if (accel_length > 0.0001f) {
+			vec3f measured_up = {{ accel->x / accel_length, accel->y / accel_length, accel->z / accel_length }};
+			float gravity_dot = ovec3f_get_dot(&measured_up, &predicted_local_up);
+			gravity_dot = OHMD_CLAMP(gravity_dot, -1.0f, 1.0f);
+			gravity_error_deg = RAD_TO_DEG(acosf(gravity_dot));
+		}
+
+		bool impact_trigger = accel_g < IMPACT_REJECT_ACCEL_LOW_G || accel_g > IMPACT_REJECT_ACCEL_HIGH_G ||
+			(gravity_error_deg > IMPACT_REJECT_GRAVITY_ERROR_DEG && gyro_dps > IMPACT_REJECT_GYRO_DPS);
+		if (impact_trigger) {
+			dev->impact_rejection_until_ts = dev->device_time_ns + IMPACT_REJECT_HOLDOFF_NS;
+			if (!dev->impact_rejection_active) {
+				dev->impact_rejection_active = true;
+				dev->impact_rejection_start_ts = dev->device_time_ns;
+				dev->impact_rejection_samples = 0;
+				LOGI("HMD impact rejection started: accel %.3fg, gravity disagreement %.2f deg, gyro %.1f deg/s",
+					accel_g, gravity_error_deg, gyro_dps);
+			}
+		}
+
+		if (dev->impact_rejection_active && dev->device_time_ns <= dev->impact_rejection_until_ts) {
+			use_accel = false;
+			dev->impact_rejection_samples++;
+		} else if (dev->impact_rejection_active) {
+			double duration_ms = (dev->device_time_ns - dev->impact_rejection_start_ts) / 1000000.0;
+			LOGI("HMD impact rejection ended: held %.1f ms, rejected %u accelerometer samples",
+				duration_ms, dev->impact_rejection_samples);
+			dev->impact_rejection_active = false;
+		}
+	}
+
+	rift_kalman_6dof_imu_update (&dev->ukf_fusion, dev->device_time_ns, ang_vel, accel, mag_field, use_accel);
 
 	obs = dev->pending_imu_observations + dev->num_pending_imu_observations;
 	obs->local_ts = local_ts;

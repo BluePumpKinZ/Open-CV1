@@ -799,21 +799,23 @@ void rift_kalman_6dof_release_delay_slot(rift_kalman_6dof_filter *state, int del
 	state->slot_inuse[delay_slot] = false;
 }
 
-void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field)
+void rift_kalman_6dof_imu_update (rift_kalman_6dof_filter *state, uint64_t time, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field, bool use_accel)
 {
-	ukf_measurement *m;
+	ukf_measurement *m = NULL;
 
 	/* Put angular velocity into the input vector to update the orientation */
 	state->ang_vel.x = ang_vel->x;
 	state->ang_vel.y = ang_vel->y;
 	state->ang_vel.z = ang_vel->z;
 
-	/* and acceleration in the measurement vector to correct the orientation by gravity */
-	/* FIXME: Use mag if set? */
-	m = &state->m1;
-	MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+0) = accel->x;
-	MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+1) = accel->y;
-	MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+2) = accel->z;
+	if (use_accel) {
+		/* Put acceleration in the measurement vector to correct the orientation by gravity. */
+		/* FIXME: Use mag if set? */
+		m = &state->m1;
+		MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+0) = accel->x;
+		MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+1) = accel->y;
+		MATRIX2D_Y(m->z, IMU_MEAS_ACCEL+2) = accel->z;
+	}
 
 	rift_kalman_6dof_update(state, time, m);
 }

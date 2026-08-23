@@ -71,6 +71,10 @@
 #define POSE_CONSENSUS_MAX_ORIENT_ERROR DEG_TO_RAD(20)
 #define POSE_CONSENSUS_MAX_POS_ERROR 0.15f
 #define POSE_CONSENSUS_MIN_LED_IDS 4
+#define CROSS_SENSOR_MAX_GAP_NS 300000000ULL
+#define HMD_CROSS_SENSOR_MIN_BLOBS 8
+#define CONTROLLER_CROSS_SENSOR_MIN_BLOBS 7
+#define CONTROLLER_CROSS_SENSOR_MAX_ERROR_PER_LED 2.0
 
 /* Reject HMD accelerometer corrections during short impacts. Gyro integration
  * and optical pose updates continue normally throughout the holdoff. */
@@ -177,6 +181,10 @@ struct rift_tracked_device_priv {
 	posef last_observed_pose;
 
 	uint64_t last_acquired_pose_lock_ts;
+	bool reacquire_candidate_valid;
+	posef reacquire_candidate_pose;
+	uint64_t reacquire_candidate_ts;
+	char reacquire_candidate_source[64];
 
 	/* Reported view pose (to the user) and model pose (for the tracking) respectively */
 	uint64_t last_reported_pose;
@@ -200,6 +208,41 @@ struct rift_tracked_device_priv {
 	ohmd_pw_debug_stream *debug_metadata;
 	FILE *debug_file;
 };
+
+static bool
+pose_has_cross_sensor_consensus(rift_tracked_device_priv *dev,
+	const posef *pose, const rift_pose_metrics *score, const char *source,
+	uint64_t observation_ts, int min_blobs, double max_error_per_led)
+{
+	if (score->matched_blobs < min_blobs ||
+			score->reprojection_error / score->matched_blobs > max_error_per_led)
+		return false;
+
+	bool sensors_agree = false;
+	if (dev->reacquire_candidate_valid &&
+			observation_ts >= dev->reacquire_candidate_ts &&
+			observation_ts - dev->reacquire_candidate_ts <= CROSS_SENSOR_MAX_GAP_NS &&
+			strcmp(source, dev->reacquire_candidate_source) != 0) {
+		quatf orient_diff;
+		vec3f rot_error, pos_error;
+
+		oquatf_diff(&pose->orient, &dev->reacquire_candidate_pose.orient, &orient_diff);
+		oquatf_normalize_me(&orient_diff);
+		oquatf_to_rotation(&orient_diff, &rot_error);
+		ovec3f_subtract(&pose->pos, &dev->reacquire_candidate_pose.pos, &pos_error);
+		sensors_agree = ovec3f_get_length(&rot_error) <= POSE_CONSENSUS_MAX_ORIENT_ERROR &&
+			ovec3f_get_length(&pos_error) <= POSE_CONSENSUS_MAX_POS_ERROR;
+	}
+
+	dev->reacquire_candidate_pose = *pose;
+	dev->reacquire_candidate_ts = observation_ts;
+	strncpy(dev->reacquire_candidate_source, source,
+		sizeof(dev->reacquire_candidate_source) - 1);
+	dev->reacquire_candidate_source[sizeof(dev->reacquire_candidate_source) - 1] = '\0';
+	dev->reacquire_candidate_valid = true;
+
+	return sensors_agree;
+}
 
 struct rift_tracker_ctx_s
 {
@@ -251,6 +294,7 @@ rift_tracker_add_device (rift_tracker_ctx *ctx, int device_id, posef *imu_pose, 
 	rift_kalman_6dof_init(&next_dev->ukf_fusion, &init_pose, next_dev->n_delay_slots, device_id != 0);
 	next_dev->last_acquired_pose_lock_ts = next_dev->last_reported_pose = next_dev->last_observed_orient_ts = next_dev->last_observed_pose_ts = next_dev->device_time_ns = 0;
 	next_dev->impact_rejection_active = false;
+	next_dev->reacquire_candidate_valid = false;
 
 	exp_filter_pose_init(&next_dev->pose_output_filter);
 
@@ -698,6 +742,13 @@ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t loca
 	rift_kalman_6dof_imu_update (&dev->ukf_fusion, dev->device_time_ns, ang_vel, accel, mag_field,
 		use_accel, accel_updates_orientation);
 
+	/* The reported HMD position is frozen after optical tracking is stale.
+	 * Freeze the filter's linear state too, otherwise unseen accelerometer
+	 * drift makes the next valid camera pose look implausibly far away. */
+	if (is_hmd && (dev->last_observed_pose_ts == 0 ||
+			dev->device_time_ns - dev->last_observed_pose_ts >= (POSE_LOST_THRESHOLD * 1000000UL)))
+		rift_kalman_6dof_clear_linear_motion(&dev->ukf_fusion);
+
 	obs = dev->pending_imu_observations + dev->num_pending_imu_observations;
 	obs->local_ts = local_ts;
 	obs->device_ts = dev->device_time_ns;
@@ -895,12 +946,15 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 			(!POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_POSITION) ||
 			 !POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_ORIENT));
 		if (hmd_needs_consensus) {
-			if (pose_has_two_sensor_consensus(slot, &imu_pose, score)) {
+			if (pose_has_two_sensor_consensus(slot, &imu_pose, score) ||
+					pose_has_cross_sensor_consensus(dev, &imu_pose, score, source,
+						frame_device_time_ns, HMD_CROSS_SENSOR_MIN_BLOBS, 3.0)) {
 				LOGI("Reacquiring HMD full pose from two-sensor LED consensus");
 				update_position = true;
 				update_orientation = true;
 				force_motion_reset = true;
 				dev->last_observed_orient_ts = dev->device_time_ns;
+				dev->reacquire_candidate_valid = false;
 			} else {
 				update_position = false;
 			}
@@ -911,16 +965,20 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 		else if (dev->base.id != 0 && dev->last_observed_orient_ts != 0 &&
 				orient_error_rad > CONTROLLER_MAX_OPTICAL_ORIENT_ERROR) {
 			/* A large disagreement can mean either an ambiguous PnP solution or
-			 * genuine IMU desynchronisation.  Require two camera reports for the
-			 * same exposure to agree, with several decoded LED identities, before
-			 * replacing the controller's complete global pose. */
-			if (pose_has_two_sensor_consensus(slot, &imu_pose, score)) {
+			 * genuine IMU desynchronisation. Controller LED IDs are assigned by
+			 * the geometric fit (their firmware supplies no individual patterns),
+			 * so only independent cameras with a tight fit may replace the full
+			 * global pose. */
+			if (pose_has_cross_sensor_consensus(dev, &imu_pose, score, source,
+						frame_device_time_ns, CONTROLLER_CROSS_SENSOR_MIN_BLOBS,
+						CONTROLLER_CROSS_SENSOR_MAX_ERROR_PER_LED)) {
 				LOGI("Reacquiring controller %d full pose from two-sensor LED consensus (IMU error %.1f degrees)",
 					dev->base.id, RAD_TO_DEG(orient_error_rad));
 				update_position = true;
 				update_orientation = true;
 				force_motion_reset = true;
 				dev->last_observed_orient_ts = dev->device_time_ns;
+				dev->reacquire_candidate_valid = false;
 			} else {
 				LOGD("Rejecting controller %d pose: optical orientation differs from IMU by %.1f degrees",
 					dev->base.id, RAD_TO_DEG(orient_error_rad));
@@ -937,6 +995,7 @@ bool rift_tracked_device_model_pose_update(rift_tracked_device *dev_base, uint64
 		/* If we have a strong match, update both position and orientation */
 		else if (POSE_HAS_FLAGS(score, RIFT_POSE_MATCH_ORIENT)) {
 			update_orientation = true;
+			dev->reacquire_candidate_valid = false;
 			if ((dev->device_time_ns - dev->last_observed_orient_ts) > (POSE_LOST_ORIENT_THRESHOLD * 1000000UL)) {
 				LOGI("Matched orientation after %f sec", (dev->device_time_ns - dev->last_observed_pose_ts) / 1000000000.0);
 			}

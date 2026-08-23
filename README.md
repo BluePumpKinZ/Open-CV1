@@ -203,10 +203,12 @@ First close SteamVR. The helper backs up and clears the old caches, then waits
 while you start SteamVR yourself. Enter the height that Beat Saber should
 report, wear the headset, stand upright in the center of the play area, and
 face forward. Keep your head and both sensors still until both sensor poses and
-a stable headset height sample are saved. The helper calculates `poseOffsetY`
-from that raw sample, SteamVR's standing-space transform, and a 12 cm
-head-to-eye allowance. Restart SteamVR afterward to load the offset; the helper
-does not start or stop SteamVR.
+a stable headset height sample are saved. The helper sets SteamVR's standing
+yaw from the circular average of all cached sensors' horizontal forward axes,
+so inward-facing sensors do not bias forward toward whichever sensor calibrated
+first. It also calculates `poseOffsetY` from the raw height sample, SteamVR's
+standing-space transform, and a 12 cm head-to-eye allowance. Restart SteamVR
+afterward to load the changes; the helper does not start or stop SteamVR.
 
 The height can also be provided non-interactively:
 
@@ -228,6 +230,15 @@ To inspect current cached sensor poses:
 ```bash
 ~/bin/calibrate-open-cv1-sensors.sh --show
 ```
+
+To correct only the standing forward direction from existing sensor poses:
+
+```bash
+~/bin/calibrate-open-cv1-sensors.sh --align-forward
+```
+
+This backs up `chaperone_info.vrchap` before changing its standing yaw. Restart
+SteamVR afterward.
 
 To manually shift all saved sensors upward by 10 cm:
 

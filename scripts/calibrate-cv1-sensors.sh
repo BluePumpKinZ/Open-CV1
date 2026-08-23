@@ -243,6 +243,95 @@ offset_positions() {
     done
 }
 
+align_standing_yaw_to_sensors() {
+    if [[ ! -r "${CHAPERONE_CONFIG}" ]]; then
+        echo "Cannot read SteamVR standing-space calibration: ${CHAPERONE_CONFIG}" >&2
+        return 1
+    fi
+
+    mapfile -t files < <(cache_files)
+    if [[ ${#files[@]} -lt 2 ]]; then
+        echo "Need at least two cached CV1 sensor poses to average their forward directions." >&2
+        return 1
+    fi
+
+    local backup_path="${CHAPERONE_CONFIG}.backup-$(date +%Y%m%d-%H%M%S)"
+    cp -a "${CHAPERONE_CONFIG}" "${backup_path}"
+
+    python3 - "${CHAPERONE_CONFIG}" "${files[@]}" <<'PY'
+import json
+import math
+import os
+import sys
+import tempfile
+
+config_path = sys.argv[1]
+pose_paths = sys.argv[2:]
+forward_x = 0.0
+forward_z = 0.0
+
+for pose_path in pose_paths:
+    values = [float(value) for value in open(pose_path, "r", encoding="utf-8").read().split()]
+    if len(values) != 7:
+        raise SystemExit(f"Invalid sensor pose cache: {pose_path}")
+
+    qx, qy, qz, qw = values[:4]
+    q_length = math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    if q_length < 1e-6:
+        raise SystemExit(f"Invalid zero-length sensor quaternion: {pose_path}")
+    qx, qy, qz, qw = (value / q_length for value in (qx, qy, qz, qw))
+
+    # Camera poses transform camera space to world space. Rotate the camera's
+    # optical +Z axis into world space and average only its horizontal heading.
+    x = 2.0 * (qx*qz + qw*qy)
+    z = 1.0 - 2.0 * (qx*qx + qy*qy)
+    horizontal_length = math.hypot(x, z)
+    if horizontal_length < 1e-6:
+        raise SystemExit(f"Sensor forward direction is vertical: {pose_path}")
+    forward_x += x / horizontal_length
+    forward_z += z / horizontal_length
+
+if math.hypot(forward_x, forward_z) < 0.25:
+    raise SystemExit("Sensor forward directions cancel; cannot choose a stable average yaw")
+
+average_yaw = math.atan2(forward_x, forward_z)
+
+with open(config_path, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+
+universes = data.get("universes", [])
+universe = next((item for item in universes if str(item.get("universeID")) == "2"), None)
+if universe is None and len(universes) == 1:
+    universe = universes[0]
+if universe is None or "standing" not in universe:
+    raise SystemExit("Could not find SteamVR standing universe 2")
+
+old_yaw = float(universe["standing"].get("yaw", 0.0))
+universe["standing"]["yaw"] = average_yaw
+
+config_dir = os.path.dirname(config_path)
+fd, temporary_path = tempfile.mkstemp(prefix=".chaperone_info.", dir=config_dir)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=3, sort_keys=True)
+        handle.write("\n")
+    os.chmod(temporary_path, os.stat(config_path).st_mode)
+    os.replace(temporary_path, config_path)
+except Exception:
+    try:
+        os.unlink(temporary_path)
+    except FileNotFoundError:
+        pass
+    raise
+
+print(f"SteamVR standing yaw: {math.degrees(old_yaw):.3f} -> {math.degrees(average_yaw):.3f} degrees")
+PY
+
+    echo "Backed up the previous SteamVR chaperone calibration to ${backup_path}."
+    echo "Aligned standing forward to the average direction of ${#files[@]} sensors."
+    echo "Restart SteamVR for the new standing yaw to take effect."
+}
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -250,6 +339,7 @@ Usage:
   calibrate-cv1-sensors.sh --reset
   calibrate-cv1-sensors.sh --height-cm CM
   calibrate-cv1-sensors.sh --relearn [--height-cm CM]
+  calibrate-cv1-sensors.sh --align-forward
   calibrate-cv1-sensors.sh --set SERIAL QX QY QZ QW PX PY PZ
   calibrate-cv1-sensors.sh --set-pos SERIAL PX PY PZ
   calibrate-cv1-sensors.sh --offset DX DY DZ
@@ -259,6 +349,7 @@ Actions:
   --reset               Remove saved CV1 sensor pose caches.
   --height-cm           Measure worn headset height without relearning sensors.
   --relearn             Relearn sensors, then set height while the headset is worn.
+  --align-forward       Set SteamVR forward from the average sensor direction.
   --set                 Write a full sensor pose cache for one sensor serial.
   --set-pos             Update only a sensor position and keep its saved orientation.
   --offset              Apply a uniform translation to every saved sensor position.
@@ -272,6 +363,8 @@ Notes:
   The driver measures raw headset height, accounts for SteamVR's standing-space
   transform and a 12 cm head-to-eye distance, then updates poseOffsetY. Restart
   SteamVR afterward to load the new offset.
+  --align-forward preserves sensor poses and averages their horizontal optical
+  axes, handling sensors that are turned inward toward the play area.
   Stand upright with SteamVR running before using --height-cm by itself.
   Use --offset 0 0.10 0 to raise all saved sensors by 10 cm.
 EOF
@@ -315,7 +408,12 @@ case "${1:-}" in
         fi
         reset_cache
         wait_for_relearn
+        align_standing_yaw_to_sensors
         calibrate_height "${height_cm}"
+        ;;
+    --align-forward)
+        [[ $# -eq 1 ]] || { usage; exit 1; }
+        align_standing_yaw_to_sensors
         ;;
     --set)
         [[ $# -eq 9 ]] || { usage; exit 1; }
